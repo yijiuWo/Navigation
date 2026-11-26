@@ -8,6 +8,7 @@
   --z-grade-high: #34c759;
   --z-grade-mid: #ff9500;
   --z-grade-low: #ff3b30;
+  --z-accent: #0a84ff;
   --z-accent-soft: #f2f2f7;
   --z-surface-glass: rgba(255, 255, 255, 0.72);
   --z-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
@@ -27,6 +28,7 @@
     --z-grade-high: #30d158;
     --z-grade-mid: #ff9f0a;
     --z-grade-low: #ff453a;
+    --z-accent: #409cff;
     --z-accent-soft: #1c1c1e;
     --z-surface-glass: rgba(28, 28, 30, 0.72);
     --z-shadow-sm: none;
@@ -572,13 +574,13 @@ body[data-nav="on"] #alert-banner {
 }
 
 #route-options .zen-option-active {
-  border-color: var(--z-ink);
-  background: var(--z-ink);
+  border-color: var(--z-accent);
+  background: var(--z-accent);
   color: var(--z-surface);
 }
 
 #route-options .zen-option-active:hover {
-  background: var(--z-ink);
+  background: var(--z-accent);
 }
 
 #route-options .zen-option-active .zen-grade-high,
@@ -598,13 +600,13 @@ body[data-nav="on"] #alert-banner {
 }
 
 #dest-candidates .zen-option-active {
-  border-color: var(--z-ink);
-  background: var(--z-ink);
+  border-color: var(--z-accent);
+  background: var(--z-accent);
   color: var(--z-surface);
 }
 
 #dest-candidates .zen-option-active:hover {
-  background: var(--z-ink);
+  background: var(--z-accent);
 }
 
 #dest-candidates .zen-option-active .zen-cand-sub {
@@ -781,7 +783,7 @@ body[data-nav="on"] #alert-banner {
   width: 44px;
   height: 44px;
   margin: -44px 0 0 -22px;
-  color: var(--z-ink);
+  color: var(--z-accent);
   opacity: 0.9;
   pointer-events: none;
   transform-origin: 50% 100%;
@@ -806,7 +808,7 @@ body[data-nav="on"] #alert-banner {
   height: 14px;
   margin: -7px 0 0 -7px;
   border-radius: 999px;
-  background: var(--z-ink);
+  background: var(--z-accent);
   box-shadow: 0 0 0 3px var(--z-surface);
 }
 

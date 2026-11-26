@@ -359,6 +359,10 @@ function ghost() {
   return getComputedStyle(document.documentElement).getPropertyValue('--z-ghost').trim() || '#737373';
 }
 
+function accent() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--z-accent').trim() || '#0a84ff';
+}
+
 function sheetHeight() {
   return els.sheet ? els.sheet.offsetHeight : 0;
 }
@@ -1085,7 +1089,7 @@ async function applyWalkRoute(route, token) {
 
   clearRouteLayers();
   renderRouteSafety(route, WALK_SAFETY_NOTE);
-  const color = ink();
+  const color = accent();
   state.routeLayers.push(
     L.polyline(
       route.points.map((point) => [point.lat, point.lng]),
@@ -1422,16 +1426,21 @@ function transitLegText(leg) {
 
 function drawRoute(route) {
   clearRouteLayers();
-  const color = ink();
+  const ride = accent();
+  const neutral = ink();
+  const faded = ghost();
 
   for (const leg of route.legs) {
     if (leg.points.length < 2) continue;
     const style = leg.walking
-      ? { color, weight: 2, opacity: 0.35, dashArray: '1 6', lineCap: 'round' }
+      ? { color: faded, weight: 2, opacity: 0.65, dashArray: '1 6', lineCap: 'round' }
       : leg.kind === 'taxi'
-        ? { color, weight: 3, opacity: 0.7, dashArray: '8 8', lineCap: 'round' }
-        : { color, weight: 4, opacity: 0.9, lineCap: 'round' };
-    state.routeLayers.push(L.polyline(leg.points.map((point) => [point.lat, point.lng]), style).addTo(map));
+        ? { color: neutral, weight: 3, opacity: 0.7, dashArray: '8 8', lineCap: 'round' }
+        : { color: ride, weight: 4, opacity: 0.9, lineCap: 'round' };
+    const line = L.polyline(leg.points.map((point) => [point.lat, point.lng]), style).addTo(map);
+    if (leg.walking) line.zenFaded = true;
+    else if (leg.kind === 'taxi') line.zenNeutral = true;
+    state.routeLayers.push(line);
   }
 
   const boardIcon = L.divIcon({
@@ -1505,7 +1514,7 @@ function drawDriveSelection() {
   els.routeNote.textContent = selected.estimated ? '路径服务暂不可用，当前为直线估算' : '';
 
   clearRouteLayers();
-  const color = ink();
+  const color = accent();
   const faded = ghost();
 
   for (const [index, candidate] of state.routeCandidates.entries()) {
@@ -2374,10 +2383,14 @@ function syncTopbarOffset() {
 
 function bindTheme() {
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    const color = ink();
-    if (accuracyCircle) accuracyCircle.setStyle({ color, fillColor: color });
-    for (const layer of [...state.routeLayers, ...state.fuel.layers]) {
-      if (typeof layer.setStyle === 'function') layer.setStyle({ color: layer.zenFaded ? ghost() : color });
+    const neutral = ink();
+    if (accuracyCircle) accuracyCircle.setStyle({ color: neutral, fillColor: neutral });
+    for (const layer of state.routeLayers) {
+      if (typeof layer.setStyle !== 'function') continue;
+      layer.setStyle({ color: layer.zenFaded ? ghost() : layer.zenNeutral ? neutral : accent() });
+    }
+    for (const layer of state.fuel.layers) {
+      if (typeof layer.setStyle === 'function') layer.setStyle({ color: neutral });
     }
   });
 }
