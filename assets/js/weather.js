@@ -21,7 +21,7 @@ async function fetchWeather({ lat, lng }) {
   url.searchParams.set('forecast_hours', '6');
   url.searchParams.set('timezone', 'auto');
 
-  const data = await ZenNet.fetchJson(url, { timeout: 10000, retries: 1 });
+  const data = await ZenNet.fetchJson(url, { timeout: 6000, retries: 0 });
   const current = data.current ?? {};
   const probs = (data.hourly?.precipitation_probability ?? []).filter(Number.isFinite).slice(0, 4);
   const maxProb = probs.length ? Math.max(...probs) : 0;

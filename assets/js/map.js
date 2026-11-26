@@ -84,6 +84,10 @@ const GEO_TTL = 7 * 24 * 60 * 60 * 1000;
 const ROUTE_TTL = 30 * 60 * 1000;
 const FUEL_TTL = 30 * 60 * 1000;
 const WEATHER_TTL = 20 * 60 * 1000;
+const WEATHER_RETRY_COOLDOWN = 60 * 1000;
+const WEATHER_SCORE_TIMEOUT = 2500;
+const WALK_SAFETY_NOTE = '步行评分基于演示风险数据与天气估算，仅供参考';
+const DRIVE_SAFETY_NOTE = '安全评分为启发式估算，风险数据为演示样本';
 const MODE_LABEL = { transit: '公交地铁', drive: '自驾', walk: '步行' };
 const MODE_TITLE = { transit: '公交路线', drive: '驾车路线', walk: '步行路线' };
 const TRANSIT_STRATEGIES = [
@@ -287,7 +291,7 @@ const state = {
   nav: { mode: 'off', offHits: 0, lastPan: 0, rerouting: false, view: null },
   engine: null,
   fuel: { loading: false, key: '', list: [], selectedId: '', layers: [] },
-  weather: { loading: false, key: '' },
+  weather: { loading: false, key: '', failedAt: 0 },
 };
 
 let map = null;
@@ -677,7 +681,9 @@ async function poiCityName() {
   if (state.originCityName) return state.originCityName;
   if (!state.origin) return '';
   const info = await reverseCity(state.origin);
-  return info.city || info.province || '';
+  const city = info.city || info.province || '';
+  if (city) state.originCityName = city;
+  return city;
 }
 
 const reversePending = new Map();
@@ -1057,9 +1063,7 @@ async function planWalkTrip() {
 async function applyWalkRoute(route, token) {
   if (token !== state.planToken) return;
 
-  const weather = await weatherForScoring(state.origin);
-  if (token !== state.planToken) return;
-  route.safety = scoreRoute(route.points, { weather, mode: 'walk' });
+  route.safety = scoreRoute(route.points, { weather: null, mode: 'walk' });
 
   state.route = route;
   els.routePanel.hidden = false;
@@ -1071,7 +1075,7 @@ async function applyWalkRoute(route, token) {
     : '步行路线来自 OSM 步行路网，国内人行道覆盖有限';
 
   clearRouteLayers();
-  renderRouteSafety(route, '步行评分基于演示风险数据与天气估算，仅供参考');
+  renderRouteSafety(route, WALK_SAFETY_NOTE);
   const color = ink();
   state.routeLayers.push(
     L.polyline(
@@ -1090,6 +1094,14 @@ async function applyWalkRoute(route, token) {
   });
   state.viewMode = 'both';
   syncStartNavButton();
+  refreshWalkSafety(route, token);
+}
+
+async function refreshWalkSafety(route, token) {
+  const weather = await weatherForScoring(state.origin);
+  if (!weather || token !== state.planToken || state.route !== route) return;
+  route.safety = scoreRoute(route.points, { weather, mode: 'walk' });
+  renderRouteSafety(route, WALK_SAFETY_NOTE);
 }
 
 async function weatherForScoring(place) {
@@ -1097,13 +1109,16 @@ async function weatherForScoring(place) {
   const cached = ZenStore.get(cacheKey, WEATHER_TTL);
   if (cached) return cached;
 
-  try {
-    const weather = await fetchWeather({ lat: place.lat, lng: place.lng });
+  const weather = await Promise.race([
+    fetchWeather({ lat: place.lat, lng: place.lng }),
+    new Promise((resolve) => setTimeout(() => resolve(null), WEATHER_SCORE_TIMEOUT)),
+  ]).catch(() => null);
+
+  if (weather) {
     ZenStore.set(cacheKey, weather);
     return weather;
-  } catch {
-    return ZenStore.getStale(cacheKey);
   }
+  return ZenStore.getStale(cacheKey);
 }
 
 function applyRoute(route, demoReason) {
@@ -1251,13 +1266,24 @@ function drawRoute(route) {
   state.viewMode = 'both';
 }
 
-async function applyDriveRoutes(routes, token) {
-  const weather = await weatherForScoring(state.origin);
+function applyDriveRoutes(routes, token) {
   if (token !== state.planToken) return;
 
-  state.routeCandidates = routes.map((route) => ({ ...route, safety: scoreRoute(route.points, { weather }) }));
+  state.routeCandidates = routes.map((route) => ({ ...route, safety: scoreRoute(route.points, { weather: null }) }));
   state.selectedRouteIndex = 0;
   drawDriveSelection();
+  refreshDriveSafety(token);
+}
+
+async function refreshDriveSafety(token) {
+  const weather = await weatherForScoring(state.origin);
+  if (!weather || token !== state.planToken || !state.routeCandidates.length) return;
+
+  state.routeCandidates = state.routeCandidates.map((route) => ({ ...route, safety: scoreRoute(route.points, { weather }) }));
+  const selected = state.routeCandidates[state.selectedRouteIndex];
+  state.route = selected;
+  renderDriveOptions();
+  renderRouteSafety(selected, DRIVE_SAFETY_NOTE);
 }
 
 function driveRoutesEstimated() {
@@ -1306,7 +1332,7 @@ function drawDriveSelection() {
   state.routeLayers.push(selectedLine);
 
   renderDriveOptions();
-  renderRouteSafety(selected, '安全评分为启发式估算，风险数据为演示样本');
+  renderRouteSafety(selected, DRIVE_SAFETY_NOTE);
 
   const bounds = L.latLngBounds(
     state.routeCandidates.flatMap((candidate) => candidate.points.map((point) => [point.lat, point.lng])),
@@ -1907,6 +1933,7 @@ async function loadWeather(force = false) {
 
   const key = `${place.lat.toFixed(2)},${place.lng.toFixed(2)}`;
   if (!force && (state.weather.key === key || state.weather.loading)) return;
+  if (!force && state.weather.failedAt && Date.now() - state.weather.failedAt < WEATHER_RETRY_COOLDOWN) return;
 
   state.weather.loading = true;
   try {
@@ -1914,6 +1941,7 @@ async function loadWeather(force = false) {
     const cached = force ? null : ZenStore.get(cacheKey, WEATHER_TTL);
     if (cached) {
       state.weather.key = key;
+      state.weather.failedAt = 0;
       renderWeather(cached, place === state.dest);
       return;
     }
@@ -1921,21 +1949,22 @@ async function loadWeather(force = false) {
       const weather = await fetchWeather(place);
       ZenStore.set(cacheKey, weather);
       state.weather.key = key;
+      state.weather.failedAt = 0;
       renderWeather(weather, place === state.dest);
     } catch (error) {
       const stale = ZenStore.getStale(cacheKey);
       if (!stale) throw error;
       state.weather.key = key;
+      state.weather.failedAt = 0;
       renderWeather(stale, place === state.dest);
       els.weatherRain.textContent += ' · 离线缓存';
     }
   } catch {
-    els.weatherPanel.hidden = false;
-    if (!state.weather.key) {
-      els.weatherTemp.textContent = '—';
-      els.weatherText.textContent = '天气服务暂不可用';
-      els.weatherRain.textContent = '';
-    }
+    state.weather.failedAt = Date.now();
+    els.weatherTemp.textContent = '—';
+    els.weatherText.textContent = '';
+    els.weatherRain.textContent = '';
+    els.weatherPanel.hidden = els.weatherDest.hidden;
   } finally {
     state.weather.loading = false;
   }
@@ -1954,31 +1983,18 @@ function sameCityKey(left, right) {
   return Boolean(a) && a === b;
 }
 
-async function cityKeyFromReverse(latlng) {
-  const info = await reverseCity(latlng);
-  return cityKeyFor(info.city, info.province);
-}
-
 async function loadDestWeather() {
   if (!state.origin || !state.dest) {
     els.weatherDest.hidden = true;
     return;
   }
 
-  const originAt = state.origin;
   const destAt = state.dest;
   els.weatherDest.hidden = true;
-  const [originKey, destKey] = await Promise.all([
-    cityKeyFor(state.originCityName, state.originCity) || cityKeyFromReverse(originAt),
-    cityKeyFor(state.destCityName, state.destCity) || cityKeyFromReverse(destAt),
-  ]);
-  if (state.origin !== originAt || state.dest !== destAt) return;
 
-  const sameCity = originKey && destKey ? sameCityKey(originKey, destKey) : distanceBetween(originAt, destAt) <= 10000;
-  if (sameCity) {
-    els.weatherDest.hidden = true;
-    return;
-  }
+  const originKey = cityKeyFor(state.originCityName, state.originCity);
+  const destKey = cityKeyFor(state.destCityName, state.destCity);
+  if (!originKey || !destKey || sameCityKey(originKey, destKey)) return;
 
   const place = { lat: destAt.lat, lng: destAt.lng };
   const cacheKey = `zenmap:weather:v1:${place.lat.toFixed(2)},${place.lng.toFixed(2)}`;
@@ -1994,12 +2010,8 @@ async function loadDestWeather() {
     offline = true;
   }
 
-  if (!weather) {
-    els.weatherDest.hidden = true;
-    return;
-  }
+  if (!weather || state.dest !== destAt) return;
 
-  if (state.dest !== destAt) return;
   els.weatherDestTemp.textContent = `${weather.temp}`;
   els.weatherDestText.textContent = `${weather.text} · 体感 ${weather.feels}°${offline ? ' · 离线缓存' : ''}`;
   els.weatherDest.hidden = false;
