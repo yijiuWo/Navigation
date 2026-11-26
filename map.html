@@ -77,6 +77,22 @@
     </div>
   </div>
 
+  <div id="nav-guide" hidden role="status" aria-live="polite" class="zen-glass">
+    <span id="nav-guide-arrow" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 20V6" />
+        <path d="M6 12l6-6 6 6" />
+      </svg>
+    </span>
+    <div class="min-w-0">
+      <p id="nav-guide-distance" class="zen-label truncate">前方 —</p>
+      <p id="nav-guide-action" class="text-lg font-semibold tracking-[-0.02em] truncate">沿路线前进</p>
+    </div>
+  </div>
+
+  <button id="nav-follow" type="button" hidden
+    class="zen-pill zen-pill-solid text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zen-ink">回到路线</button>
+
   <button id="nav-exit" type="button" hidden
     style="bottom: calc(env(safe-area-inset-bottom) + 1rem)"
     class="zen-pill zen-pill-solid fixed right-3 z-30 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zen-ink">退出导航</button>

@@ -59,6 +59,11 @@ const els = {
   navRemain: $('#nav-remain'),
   navEta: $('#nav-eta'),
   navLeg: $('#nav-leg'),
+  navGuide: $('#nav-guide'),
+  navGuideArrow: $('#nav-guide-arrow'),
+  navGuideDistance: $('#nav-guide-distance'),
+  navGuideAction: $('#nav-guide-action'),
+  navFollow: $('#nav-follow'),
   navOffRoute: $('#nav-offroute'),
   navReroute: $('#nav-reroute'),
   navExit: $('#nav-exit'),
@@ -294,7 +299,7 @@ const state = {
   exitSide: '',
   remindResult: null,
   bannerTimer: 0,
-  nav: { mode: 'off', offHits: 0, lastPan: 0, rerouting: false, view: null },
+  nav: { mode: 'off', offHits: 0, lastPan: 0, rerouting: false, view: null, follow: true, toTurn: Infinity, zoomedIn: false, spoken: null, wakeLock: null },
   heading: { value: null, enabled: false, source: '', timer: 0, raf: 0, lastPaint: 0 },
   engine: null,
   fuel: { loading: false, key: '', list: [], selectedId: '', layers: [] },
@@ -1711,9 +1716,23 @@ const NAV_OFF_LIMIT = 80;
 const NAV_RECOVER_LIMIT = 50;
 const NAV_CONFIRM_HITS = 2;
 const NAV_ACCURACY_LIMIT = 150;
-const NAV_PAN_INTERVAL = 1200;
+const NAV_PAN_INTERVAL = 600;
 const NAV_ZOOM = 17;
+const NAV_ZOOM_CLOSE = 18;
+const NAV_ZOOM_IN_LIMIT = 120;
+const NAV_ZOOM_OUT_LIMIT = 200;
+const NAV_FOLLOW_PIXEL = 30;
+const NAV_VOICE_THRESHOLDS = [300, 50];
 const NAV_ARRIVE_LIMIT = 50;
+const NAV_ARROW_ANGLE = {
+  uturn: 180,
+  'sharp right': 135,
+  right: 90,
+  'slight right': 45,
+  'sharp left': -135,
+  left: -90,
+  'slight left': -45,
+};
 
 function ensureRouteMetrics(route) {
   if (!route) return null;
@@ -1729,31 +1748,83 @@ function syncStartNavButton() {
   els.startNav.hidden = !state.route || state.nav.mode !== 'off';
 }
 
+function navVibrate(pattern) {
+  const canVibrate = !navigator.userActivation || navigator.userActivation.hasBeenActive;
+  if ('vibrate' in navigator && canVibrate) {
+    try {
+      navigator.vibrate(pattern);
+    } catch {}
+  }
+}
+
+function requestWakeLock() {
+  if (!('wakeLock' in navigator) || state.nav.wakeLock) return;
+  navigator.wakeLock.request('screen').then((lock) => {
+    state.nav.wakeLock = lock;
+    lock.addEventListener?.('release', () => {
+      if (state.nav.wakeLock === lock) state.nav.wakeLock = null;
+    });
+  }).catch(() => {});
+}
+
+function releaseWakeLock() {
+  const lock = state.nav.wakeLock;
+  state.nav.wakeLock = null;
+  try {
+    lock?.release?.();
+  } catch {}
+}
+
+function resetNavTurn() {
+  state.nav.spoken = new Set();
+  state.nav.toTurn = Infinity;
+  state.nav.zoomedIn = false;
+}
+
 function startNavigation() {
   if (!state.route || state.nav.mode !== 'off') return;
-  ensureRouteMetrics(state.route);
+  const route = ensureRouteMetrics(state.route);
   state.nav.mode = 'following';
   state.nav.offHits = 0;
+  state.nav.follow = true;
+  resetNavTurn();
+  state.nav.spoken = null;
   state.nav.view = { center: map.getCenter(), zoom: map.getZoom() };
   document.body.dataset.nav = 'on';
   els.navBar.hidden = false;
   els.navExit.hidden = false;
   els.navOffRoute.hidden = true;
   els.navLeg.hidden = !isTransit();
+  els.navGuide.hidden = isTransit();
+  els.navFollow.hidden = true;
+  if (!isTransit()) renderNavGuide(route, 0, route.total);
   syncStartNavButton();
-  if (state.lastFix) followNavPosition(state.lastFix);
+  if (state.lastFix) {
+    state.nav.lastPan = Date.now();
+    map.flyTo(L.latLng(state.lastFix.lat, state.lastFix.lng), NAV_ZOOM, { duration: 0.6 });
+  }
   updateNavigation(state.lastFix);
+  state.nav.spoken = new Set();
   startHeadingTrack();
+  requestWakeLock();
+  speak(`开始导航，全程 ${(route.total / 1000).toFixed(1)} 公里，预计 ${Math.max(1, Math.round(route.duration / 60))} 分钟`);
 }
 
 function stopNavigation() {
   if (state.nav.mode === 'off') return;
   state.nav.mode = 'off';
   state.nav.offHits = 0;
+  state.nav.follow = true;
+  state.nav.toTurn = Infinity;
+  state.nav.zoomedIn = false;
+  state.nav.spoken = null;
   delete document.body.dataset.nav;
   els.navBar.hidden = true;
   els.navExit.hidden = true;
   els.navOffRoute.hidden = true;
+  els.navGuide.hidden = true;
+  els.navFollow.hidden = true;
+  releaseWakeLock();
   syncStartNavButton();
   window.clearTimeout(state.bannerTimer);
   els.banner.hidden = true;
@@ -1843,17 +1914,90 @@ function applyHeadingMarker(value) {
   cone.style.transform = `rotate(${value.toFixed(1)}deg)`;
 }
 
+function navWantedZoom() {
+  if (state.nav.zoomedIn && state.nav.toTurn > NAV_ZOOM_OUT_LIMIT) state.nav.zoomedIn = false;
+  else if (!state.nav.zoomedIn && Number.isFinite(state.nav.toTurn) && state.nav.toTurn < NAV_ZOOM_IN_LIMIT) state.nav.zoomedIn = true;
+  return state.nav.zoomedIn ? NAV_ZOOM_CLOSE : NAV_ZOOM;
+}
+
 function followNavPosition(fix) {
+  if (!state.nav.follow) return;
   const now = Date.now();
+  if (now - state.nav.lastPan < NAV_PAN_INTERVAL) return;
+
   const target = L.latLng(fix.lat, fix.lng);
-  if (map.getZoom() < NAV_ZOOM) {
-    map.setView(target, NAV_ZOOM);
-    state.nav.lastPan = now;
+  const wanted = navWantedZoom();
+  const needsZoom = Math.abs(map.getZoom() - wanted) >= 1;
+  const drift = map.latLngToContainerPoint(target).distanceTo(map.latLngToContainerPoint(map.getCenter()));
+  if (!needsZoom && drift < NAV_FOLLOW_PIXEL) return;
+
+  state.nav.lastPan = now;
+  if (needsZoom) map.setView(target, wanted, { animate: true, duration: 0.6 });
+  else map.panTo(target, { animate: true, duration: 0.6 });
+}
+
+function pauseNavFollow() {
+  if (state.nav.mode !== 'following' || !state.nav.follow) return;
+  state.nav.follow = false;
+  els.navFollow.hidden = false;
+}
+
+function resumeNavFollow() {
+  state.nav.follow = true;
+  state.nav.lastPan = 0;
+  els.navFollow.hidden = true;
+  if (state.lastFix) followNavPosition(state.lastFix);
+}
+
+function paintGuideArrow(turn) {
+  const svg = els.navGuideArrow?.querySelector('svg');
+  if (!svg) return;
+  const roundabout = turn.type === 'roundabout' || turn.type === 'rotary';
+  const angle = roundabout ? 90 : NAV_ARROW_ANGLE[turn.modifier] ?? 0;
+  svg.style.transform = `rotate(${angle}deg)`;
+}
+
+function announceNavTurn(index, turn, distance) {
+  if (!state.nav.spoken || turn.type === 'arrive') return;
+  const hit = NAV_VOICE_THRESHOLDS.filter((threshold) => distance <= threshold).pop();
+  if (hit == null) return;
+
+  const key = `${index}:${hit}`;
+  if (state.nav.spoken.has(key)) return;
+  state.nav.spoken.add(key);
+  if (hit === NAV_VOICE_THRESHOLDS[0]) {
+    speak(`前方 ${hit} 米，${turn.text}`);
     return;
   }
-  if (now - state.nav.lastPan < NAV_PAN_INTERVAL) return;
-  state.nav.lastPan = now;
-  map.panTo(target, { animate: true, duration: 0.6 });
+  speak(turn.name ? `${turn.text}，进入${turn.name}` : turn.text);
+}
+
+function renderNavGuide(route, along, remaining) {
+  const turns = route.turns || [];
+  if (!turns.length) {
+    state.nav.toTurn = Infinity;
+    els.navGuideDistance.textContent = `全程 ${formatMeters(route.total)}`;
+    els.navGuideAction.textContent = '沿路线前进';
+    paintGuideArrow({ type: 'continue', modifier: '' });
+    return;
+  }
+
+  const index = turns.findIndex((turn) => turn.along > along + 5);
+  if (index < 0) {
+    state.nav.toTurn = 0;
+    els.navGuideDistance.textContent = `前方 ${formatMeters(remaining)}`;
+    els.navGuideAction.textContent = '到达目的地';
+    paintGuideArrow({ type: 'arrive', modifier: '' });
+    return;
+  }
+
+  const turn = turns[index];
+  const distance = Math.max(0, turn.along - along);
+  state.nav.toTurn = distance;
+  els.navGuideDistance.textContent = `前方 ${formatMeters(distance)}`;
+  els.navGuideAction.textContent = turn.name && turn.type !== 'arrive' ? `${turn.text}进入${turn.name}` : turn.text;
+  paintGuideArrow(turn);
+  announceNavTurn(index, turn, distance);
 }
 
 function updateNavigation(fix) {
@@ -1882,6 +2026,7 @@ function updateNavigation(fix) {
 
   if (state.nav.mode !== 'following') return;
   if (isTransit()) els.navLeg.textContent = transitGuidance(route, projection.along);
+  else if (accurate) renderNavGuide(route, projection.along, remaining);
   followNavPosition(fix);
   if (remaining <= NAV_ARRIVE_LIMIT) markNavArrived();
 }
@@ -1890,12 +2035,15 @@ function enterNavOffRoute() {
   state.nav.mode = 'off-route';
   state.nav.offHits = 0;
   els.navOffRoute.hidden = false;
+  navVibrate([200, 80, 200]);
+  speak('已偏离路线，正在重新规划');
 }
 
 function leaveNavOffRoute() {
   state.nav.mode = 'following';
   state.nav.offHits = 0;
   els.navOffRoute.hidden = true;
+  speak('已回到导航路线');
 }
 
 function renderNavMetrics(route, remaining) {
@@ -1992,10 +2140,13 @@ async function rerouteFromNavigation() {
     ensureRouteMetrics(state.route);
     state.nav.mode = 'following';
     state.nav.offHits = 0;
+    resetNavTurn();
     els.navOffRoute.hidden = true;
     els.navLeg.hidden = !isTransit();
+    els.navGuide.hidden = isTransit();
     if (state.lastFix) followNavPosition(state.lastFix);
     updateNavigation(state.lastFix);
+    speak('已重新规划路线');
   } catch {
     els.navOffRoute.hidden = false;
     showBanner('重新规划失败', '检查网络后再试一次');
@@ -2424,7 +2575,15 @@ function bindEvents() {
   els.startNav.addEventListener('click', startNavigation);
   els.navExit.addEventListener('click', stopNavigation);
   els.navReroute.addEventListener('click', rerouteFromNavigation);
+  els.navFollow.addEventListener('click', resumeNavFollow);
+  map.on('dragstart', pauseNavFollow);
   window.addEventListener('pagehide', stopWatch);
+}
+
+function bindWakeLock() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.nav.mode !== 'off') requestWakeLock();
+  });
 }
 
 function mountTiles(source = TILE_PRIMARY) {
@@ -2521,6 +2680,7 @@ function boot() {
   bindTheme();
   bindNetwork();
   bindEvents();
+  bindWakeLock();
   bindTransitUI();
   bindFuel();
   bindRouteCards();
