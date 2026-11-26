@@ -242,7 +242,7 @@ async function buildPoiCandidates(query, { cityName, wide: prefetched } = {}) {
   throw new Error('poi-empty');
 }
 
-function rankPoiGroups(groups, origin) {
+function rankPoiGroups(groups, origin, { noPick = false } = {}) {
   const scored = groups.map((group) => ({ ...group, count: group.members.length }));
   const hasOrigin = origin && Number.isFinite(origin.lat) && Number.isFinite(origin.lng);
 
@@ -252,6 +252,7 @@ function rankPoiGroups(groups, origin) {
         .sort((a, b) => a.distance - b.distance)
     : [...scored].sort((a, b) => a.amapOrder - b.amapOrder || a.photonOrder - b.photonOrder);
 
+  if (noPick) return { list: ordered.slice(0, CANDIDATE_LIMIT), selected: 0 };
   return { list: putPickedFirst(ordered, pickPoiGroup(ordered, hasOrigin)), selected: 0 };
 }
 

@@ -543,7 +543,7 @@ async function resolveDestination() {
   try {
     const place = await geocode(trip.destination);
     if (token !== destToken) return;
-    state.destCandidates = (place.candidates || []).length > 1 ? place.candidates : [];
+    state.destCandidates = place.needsChoice || (place.candidates || []).length > 1 ? place.candidates : [];
     if (place.degraded) els.destNoteWarn.hidden = false;
 
     if (state.destCandidates.length) {
@@ -612,6 +612,8 @@ function renderCandidatePanel() {
 
 function candidateDetail(candidate) {
   const parts = [];
+  const city = candidate.city || candidate.province;
+  if (city) parts.push(city);
   if (candidate.district) parts.push(candidate.district);
   if (state.origin) parts.push(`距起点 ${(distanceBetween(state.origin, candidate) / 1000).toFixed(1)} km`);
   if ((candidate.members || []).length > 1) parts.push(`同片区共 ${candidate.members.length} 个场所`);
@@ -630,31 +632,32 @@ function selectCandidate(index) {
 }
 
 async function geocode(query) {
-  const cacheKey = `zenmap:geo:v3:${query.trim().toLowerCase()}`;
-  const cached = ZenStore.get(cacheKey, GEO_TTL);
-  if (cached) return pickPlace(cached);
-
-  const cityTask = poiCityName();
   const wideTask = collectPoiItems(query, '').catch(() => null);
-  const [cityName, wide] = await Promise.all([cityTask, wideTask]);
+  const cityName = await poiCityName();
+  const cacheKey = `zenmap:geo:v4:${cityName || '-'}:${query.trim().toLowerCase()}`;
+  if (cityName) {
+    const cached = ZenStore.get(cacheKey, GEO_TTL);
+    if (cached) return pickPlace(cached, cityName);
+  }
 
   try {
-    const result = await buildPoiCandidates(query, { cityName, wide });
-    ZenStore.set(cacheKey, result);
-    return pickPlace(result);
+    const result = await buildPoiCandidates(query, { cityName, wide: await wideTask });
+    if (cityName) ZenStore.set(cacheKey, result);
+    return pickPlace(result, cityName);
   } catch (error) {
-    const stale = ZenStore.getStale(cacheKey);
-    if (stale) return pickPlace(stale);
+    const stale = cityName ? ZenStore.getStale(cacheKey) : null;
+    if (stale) return pickPlace(stale, cityName);
     const fallback = PLACE_FALLBACK[query.trim().toLowerCase()];
     if (fallback) return { ...fallback, district: '', cityName: '', candidates: null, selected: 0, degraded: true };
     throw error;
   }
 }
 
-function pickPlace(result) {
-  const ranked = rankPoiGroups(result.groups, state.origin);
-  const picked = ranked.list[ranked.selected];
-  if (!picked) throw new Error('geocode-empty');
+function pickPlace(result, cityName = '') {
+  const noPick = !cityName && !state.origin && Boolean(result.crossCity);
+  const ranked = rankPoiGroups(result.groups, state.origin, { noPick });
+  if (!ranked.list.length) throw new Error('geocode-empty');
+  const picked = ranked.list[ranked.selected] ?? ranked.list[0];
 
   return {
     lat: picked.lat,
@@ -665,6 +668,7 @@ function pickPlace(result) {
     cityName: picked.city || picked.province || '',
     candidates: ranked.list,
     selected: ranked.selected,
+    needsChoice: noPick,
     degraded: !!result.degraded,
   };
 }
@@ -678,7 +682,37 @@ async function poiCityName() {
 
 const reversePending = new Map();
 
+async function reverseCityAmap(latlng) {
+  const cacheKey = `zenmap:rev:v3:${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`;
+  const cached = ZenStore.get(cacheKey, GEO_TTL);
+  if (cached) return cached;
+
+  const key = (window.ZENMAP_CONFIG?.amapKey || '').trim();
+  if (!key) throw new Error('rev-no-key');
+
+  const point = wgs84ToGcj02(latlng.lat, latlng.lng);
+  const url = `https://restapi.amap.com/v3/geocode/regeo?key=${encodeURIComponent(key)}&location=${point.lng.toFixed(6)},${point.lat.toFixed(6)}`;
+  const data = await ZenNet.fetchJson(url, { timeout: 6000, retries: 0 });
+  if (data?.status !== '1') throw new Error(`rev-${data?.infocode || data?.info || 'error'}`);
+
+  const component = data?.regeocode?.addressComponent ?? {};
+  const province = typeof component.province === 'string' ? component.province.trim() : '';
+  const city = typeof component.city === 'string' ? component.city.trim() : '';
+  const info = { province, city: city || province };
+  if (!info.city) throw new Error('rev-empty');
+
+  ZenStore.set(cacheKey, info);
+  return info;
+}
+
 async function reverseCity(latlng) {
+  try {
+    return await reverseCityAmap(latlng);
+  } catch {}
+  return reverseCityPhoton(latlng);
+}
+
+async function reverseCityPhoton(latlng) {
   const cacheKey = `zenmap:rev:v2:${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`;
   const cached = ZenStore.get(cacheKey, GEO_TTL);
   if (cached) return cached;
@@ -687,7 +721,7 @@ async function reverseCity(latlng) {
   const task = (async () => {
     try {
       const url = `https://photon.komoot.io/reverse?lat=${latlng.lat}&lon=${latlng.lng}&lang=default`;
-      const data = await ZenNet.fetchJson(url, { timeout: 8000, retries: 0 });
+      const data = await ZenNet.fetchJson(url, { timeout: 4000, retries: 0 });
       const props = data?.features?.[0]?.properties ?? {};
       const info = { province: props.state || '', city: props.city || '' };
       ZenStore.set(cacheKey, info);
