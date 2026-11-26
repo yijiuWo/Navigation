@@ -268,6 +268,7 @@ const state = {
   originCityName: '',
   dest: null,
   destCity: '',
+  destCityName: '',
   destLabel: '',
   destCandidates: [],
   watchId: null,
@@ -552,7 +553,7 @@ async function resolveDestination() {
       renderCandidatePanel();
       return;
     }
-    applyChoice({ name: place.label, district: place.district, lat: place.lat, lng: place.lng, transitCity: place.city }, { plan: true });
+    applyChoice({ name: place.label, district: place.district, lat: place.lat, lng: place.lng, transitCity: place.city, cityName: place.cityName || place.city }, { plan: true });
   } catch {
     if (token !== destToken) return;
     state.destCandidates = [];
@@ -566,6 +567,7 @@ function applyChoice(choice, { plan }) {
   state.dest = latlng;
   state.destLabel = choice.name || trip.destination;
   state.destCity = choice.transitCity || '';
+  state.destCityName = choice.cityName || '';
   if (destinationMarker) map.removeLayer(destinationMarker);
   destinationMarker = L.marker(latlng, { icon: destinationIcon, keyboard: false }).addTo(map);
 
@@ -624,7 +626,7 @@ function selectCandidate(index) {
   const candidate = state.destCandidates[index];
   if (!candidate) return;
   resetRouteState();
-  applyChoice({ name: candidate.name, district: candidate.district, lat: candidate.lat, lng: candidate.lng, transitCity: candidate.province || candidate.city }, { plan: true });
+  applyChoice({ name: candidate.name, district: candidate.district, lat: candidate.lat, lng: candidate.lng, transitCity: candidate.province || candidate.city, cityName: candidate.city || candidate.province }, { plan: true });
 }
 
 async function geocode(query) {
@@ -1035,7 +1037,7 @@ async function applyWalkRoute(route, token) {
     : '步行路线来自 OSM 步行路网，国内人行道覆盖有限';
 
   clearRouteLayers();
-  renderRouteSafety(route);
+  renderRouteSafety(route, '步行评分基于演示风险数据与天气估算，仅供参考');
   const color = ink();
   state.routeLayers.push(
     L.polyline(
@@ -1270,7 +1272,7 @@ function drawDriveSelection() {
   state.routeLayers.push(selectedLine);
 
   renderDriveOptions();
-  renderRouteSafety(selected, true);
+  renderRouteSafety(selected, '安全评分为启发式估算，风险数据为演示样本');
 
   const bounds = L.latLngBounds(
     state.routeCandidates.flatMap((candidate) => candidate.points.map((point) => [point.lat, point.lng])),
@@ -1315,7 +1317,7 @@ function renderDriveOptions() {
   }
 }
 
-function renderRouteSafety(candidate, showDisclaimer = false) {
+function renderRouteSafety(candidate, disclaimerText = '') {
   els.routeSafety.hidden = false;
   els.routeSafety.textContent = '';
 
@@ -1338,7 +1340,8 @@ function renderRouteSafety(candidate, showDisclaimer = false) {
     els.routeSafety.append(row);
   }
 
-  els.safetyDisclaimer.hidden = !showDisclaimer;
+  els.safetyDisclaimer.textContent = disclaimerText;
+  els.safetyDisclaimer.hidden = !disclaimerText;
 }
 
 function bindRouteCards() {
@@ -1904,13 +1907,46 @@ async function loadWeather(force = false) {
   }
 }
 
+function cityKeyFor(cityName, regionName) {
+  const city = (cityName || '').trim();
+  if (city.endsWith('市')) return city;
+  const region = (regionName || '').trim();
+  return region.endsWith('市') ? region : '';
+}
+
+function sameCityKey(left, right) {
+  const a = left.replace(/\s+/g, '').replace(/市$/, '');
+  const b = right.replace(/\s+/g, '').replace(/市$/, '');
+  return Boolean(a) && a === b;
+}
+
+async function cityKeyFromReverse(latlng) {
+  const info = await reverseCity(latlng);
+  return cityKeyFor(info.city, info.province);
+}
+
 async function loadDestWeather() {
-  if (!state.origin || !state.dest || distanceBetween(state.origin, state.dest) <= 10000) {
+  if (!state.origin || !state.dest) {
     els.weatherDest.hidden = true;
     return;
   }
 
-  const place = { lat: state.dest.lat, lng: state.dest.lng };
+  const originAt = state.origin;
+  const destAt = state.dest;
+  els.weatherDest.hidden = true;
+  const [originKey, destKey] = await Promise.all([
+    cityKeyFor(state.originCityName, state.originCity) || cityKeyFromReverse(originAt),
+    cityKeyFor(state.destCityName, state.destCity) || cityKeyFromReverse(destAt),
+  ]);
+  if (state.origin !== originAt || state.dest !== destAt) return;
+
+  const sameCity = originKey && destKey ? sameCityKey(originKey, destKey) : distanceBetween(originAt, destAt) <= 10000;
+  if (sameCity) {
+    els.weatherDest.hidden = true;
+    return;
+  }
+
+  const place = { lat: destAt.lat, lng: destAt.lng };
   const cacheKey = `zenmap:weather:v1:${place.lat.toFixed(2)},${place.lng.toFixed(2)}`;
   let weather = ZenStore.get(cacheKey, WEATHER_TTL);
   let offline = false;
@@ -1929,6 +1965,7 @@ async function loadDestWeather() {
     return;
   }
 
+  if (state.dest !== destAt) return;
   els.weatherDestTemp.textContent = `${weather.temp}`;
   els.weatherDestText.textContent = `${weather.text} · 体感 ${weather.feels}°${offline ? ' · 离线缓存' : ''}`;
   els.weatherDest.hidden = false;
