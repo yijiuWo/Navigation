@@ -1,5 +1,10 @@
 const POI_SEARCH_URL = 'https://restapi.amap.com/v5/place/text';
 const PHOTON_SEARCH_URL = 'https://photon.komoot.io/api/';
+const AMAP_AROUND_URL = 'https://restapi.amap.com/v5/place/around';
+const AMAP_TYPE_METRO_EXIT = '150501';
+const AMAP_TYPE_BUS_STOP = '150700';
+const AROUND_RADIUS = 900;
+const AROUND_GAP_MS = 260;
 const CANDIDATE_LIMIT = 5;
 const TYPE_TIE_METERS = 300;
 const DEFAULT_CLUSTER_RADIUS = 1000;
@@ -147,6 +152,74 @@ async function searchAmapPoi(query, cityName) {
     })
     .filter(Boolean)
     .filter((item) => !POI_NOISE_TYPE.test(item.type));
+}
+
+const aroundCache = new Map();
+let aroundTail = Promise.resolve();
+
+function waitAroundGap() {
+  return new Promise((resolve) => setTimeout(resolve, AROUND_GAP_MS));
+}
+
+function enqueueAround(task) {
+  const run = aroundTail.then(task);
+  aroundTail = run.then(waitAroundGap, waitAroundGap);
+  return run;
+}
+
+async function requestAmapAround(coord, types) {
+  const key = (window.ZENMAP_CONFIG?.amapKey || '').trim();
+  if (!key) throw new Error('around-no-key');
+
+  const gcj = wgs84ToGcj02(coord.lat, coord.lng);
+  const params = new URLSearchParams({
+    key,
+    location: `${gcj.lng.toFixed(6)},${gcj.lat.toFixed(6)}`,
+    types,
+    radius: String(AROUND_RADIUS),
+    sortrule: 'distance',
+    page_size: '20',
+  });
+
+  const data = await ZenNet.fetchJson(`${AMAP_AROUND_URL}?${params}`, { timeout: 6000, retries: 0 });
+  if (data?.status !== '1') throw new Error(`around-${data?.infocode || data?.info || 'error'}`);
+
+  return (data.pois || [])
+    .map((poi) => {
+      const [lngGcj, latGcj] = String(poi.location || '').split(',').map(Number);
+      if (!Number.isFinite(latGcj) || !Number.isFinite(lngGcj)) return null;
+      const point = gcj02ToWgs84(latGcj, lngGcj);
+      return { name: poi.name || '', type: poi.type || '', lat: point.lat, lng: point.lng };
+    })
+    .filter((item) => item && item.name);
+}
+
+function aroundCacheKey(coord, types) {
+  return `${types}:${coord.lat.toFixed(4)},${coord.lng.toFixed(4)}`;
+}
+
+function fetchAmapAround(coord, types) {
+  if (!coord || !Number.isFinite(coord.lat) || !Number.isFinite(coord.lng)) return Promise.resolve([]);
+  const cacheKey = aroundCacheKey(coord, types);
+  const cached = aroundCache.get(cacheKey);
+  if (cached) return cached;
+
+  const pending = enqueueAround(() => requestAmapAround(coord, types)).catch((error) => {
+    aroundCache.delete(cacheKey);
+    throw error;
+  });
+  aroundCache.set(cacheKey, pending);
+  return pending;
+}
+
+function exitShortName(name) {
+  const raw = poiNameKey(name);
+  if (!raw) return '';
+  const letter = raw.match(/([A-Za-z0-9])(?:号)?(?:出入口|出口|入口|口)$/);
+  if (letter) return `${letter[1]}口`;
+  const afterStation = raw.match(/站(.+)$/);
+  if (afterStation) return afterStation[1];
+  return raw;
 }
 
 async function searchPhotonPoi(query, cityName) {

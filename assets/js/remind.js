@@ -65,6 +65,40 @@ function pointAtAlong(points, cum, along) {
   return { index: Math.max(0, points.length - 2), point: { lat: last.lat, lng: last.lng } };
 }
 
+const STOP_PASS_MARGIN = 40;
+
+function buildStopMarks(route) {
+  if (!route || !Array.isArray(route.legs) || !Array.isArray(route.points) || !Array.isArray(route.cum)) return [];
+  const rides = route.legs.filter((leg) => !leg.walking && Array.isArray(leg.points) && leg.points.length >= 2);
+  const finalLeg = rides[rides.length - 1];
+  const found = [];
+
+  for (const leg of rides) {
+    const stops = [leg.from, ...(leg.stops || []), leg.to].filter((stop) => stop && stop.name && Number.isFinite(stop.lat) && Number.isFinite(stop.lng));
+    if (stops.length < 2) continue;
+
+    for (const [index, stop] of stops.entries()) {
+      const legEnd = index === stops.length - 1;
+      const terminal = legEnd && leg === finalLeg;
+      const projection = projectOnRoute(route.points, route.cum, stop);
+      if (projection.offset > 1200) continue;
+      found.push({
+        name: stop.name,
+        along: projection.along,
+        kind: legEnd ? (terminal ? 'alight' : 'transfer') : 'via',
+        exit: terminal ? leg.exit || null : null,
+      });
+    }
+  }
+
+  const marks = [];
+  for (const mark of found) {
+    if (marks.some((item) => item.name === mark.name && Math.abs(item.along - mark.along) < 2)) continue;
+    marks.push(mark);
+  }
+  return marks.sort((a, b) => a.along - b.along);
+}
+
 function createReminderEngine(options = {}) {
   const config = {
     threshold: options.threshold ?? 500,
@@ -76,6 +110,7 @@ function createReminderEngine(options = {}) {
   };
 
   let route = null;
+  let marks = [];
   let threshold = config.threshold;
   let boarded = false;
   const armed = { boarding: true, alighting: true };
@@ -92,6 +127,7 @@ function createReminderEngine(options = {}) {
 
   function setRoute(next) {
     route = next;
+    marks = buildStopMarks(next);
     boarded = false;
     armed.boarding = true;
     armed.alighting = true;
@@ -101,6 +137,7 @@ function createReminderEngine(options = {}) {
 
   function clear() {
     route = null;
+    marks = [];
     resetCounters();
   }
 
@@ -158,11 +195,18 @@ function createReminderEngine(options = {}) {
       alert = 'boarding';
     }
 
+    const upcoming = marks.filter((mark) => mark.along > projection.along + STOP_PASS_MARGIN);
+    const nextStop = boarded ? upcoming[0] || null : null;
+    const nextRideEnd = upcoming.findIndex((mark) => mark.kind === 'alight' || mark.kind === 'transfer');
+    const stopsLeft = nextStop && nextRideEnd > 0 ? nextRideEnd : 0;
+
     return {
       ...base,
       boarded,
       boardingRemaining: Math.max(0, boardingRemaining),
       alightingRemaining: Math.max(0, alightingRemaining),
+      nextStop,
+      stopsLeft,
       alert,
     };
   }

@@ -41,8 +41,12 @@ const els = {
   routeStops: $('#route-stops'),
   routeRemind: $('#route-remind'),
   boardName: $('#board-name'),
+  boardExtra: $('#board-extra'),
   alightName: $('#alight-name'),
   alightExtra: $('#alight-extra'),
+  routeExits: $('#route-exits'),
+  routeExitsToggle: $('#route-exits-toggle'),
+  routeExitsList: $('#route-exits-list'),
   transitCross: $('#transit-cross'),
   transitCrossText: $('#transit-cross-text'),
   transitCrossToggle: $('#transit-cross-toggle'),
@@ -287,6 +291,8 @@ const state = {
   transitStrategy: '0',
   transitDemoReason: '',
   transitPending: false,
+  exitSide: '',
+  remindResult: null,
   bannerTimer: 0,
   nav: { mode: 'off', offHits: 0, lastPan: 0, rerouting: false, view: null },
   heading: { value: null, enabled: false, source: '', timer: 0, raf: 0, lastPaint: 0 },
@@ -1126,11 +1132,14 @@ async function weatherForScoring(place) {
 
 function applyRoute(route, demoReason) {
   state.route = route;
+  state.remindResult = null;
+  bindTransitExits(route);
   renderRouteInfo(route, demoReason);
   drawRoute(route);
   state.engine?.setRoute(route);
   if (state.lastFix) feedReminder(state.lastFix);
   syncStartNavButton();
+  fillMissingTransitExit(route);
 }
 
 function renderRouteInfo(route, demoReason) {
@@ -1186,30 +1195,213 @@ function railwayLabel(leg) {
 }
 
 function renderTransitStops(route) {
-  els.boardName.textContent = route.boarding.name || '上车站';
   const { taxi, last } = lastRideLegs(route);
+  const first = route.legs.find((leg) => !leg.walking);
+
+  els.boardName.textContent = boardStopText(route, first);
+  const boardHint = boardHintText(route, first);
+  els.boardExtra.hidden = !boardHint;
+  els.boardExtra.textContent = boardHint;
 
   if (last?.kind === 'railway') {
     els.alightName.textContent = railwayLabel(last) || route.alighting.name || '下车站';
   } else {
-    els.alightName.textContent = (last && last.toName) || route.alighting.name || '下车站';
+    els.alightName.textContent = alightStopText(route, last);
   }
 
-  if (taxi) {
-    els.alightExtra.textContent = `${taxi.toName || '目的地'}（打车 ${formatMeters(taxi.distance)}）`;
-    els.alightExtra.hidden = false;
-  } else {
-    els.alightExtra.hidden = true;
+  const alightHint = alightHintText(route, last, taxi);
+  els.alightExtra.hidden = !alightHint;
+  els.alightExtra.textContent = alightHint;
+
+  renderRouteExits(route);
+}
+
+function boardStopText(route, leg) {
+  const name = route.boarding.name || '上车站';
+  const label = leg?.metro ? route.boarding.exit?.label || '' : '';
+  return label ? `${name} ${label}进` : name;
+}
+
+function boardHintText(route, leg) {
+  if (!leg) return '';
+  if (leg.metro) {
+    const label = route.boarding.exit?.label || '';
+    const distance = route.boarding.exit?.distance;
+    if (!label) return [leg.label || leg.name, leg.direction].filter(Boolean).join(' ');
+    return Number.isFinite(distance) ? `步行到${label}约 ${formatMeters(distance)}` : `${label}进`;
+  }
+  if (leg.kind === 'railway') return '';
+  if (leg.kind === 'taxi') return leg.fromName || '';
+  return [leg.label || leg.name, leg.direction].filter(Boolean).join(' ');
+}
+
+function alightStopText(route, leg) {
+  const name = (leg && leg.toName) || route.alighting.name || '下车站';
+  const label = leg?.metro ? route.alighting.exit?.label || '' : '';
+  return label ? `${name} ${label}出` : name;
+}
+
+function alightHintText(route, last, taxi) {
+  if (taxi) return `${taxi.toName || '目的地'}（打车 ${formatMeters(taxi.distance)}）`;
+  if (last?.metro) {
+    const distance = route.alighting.exit?.distance;
+    return Number.isFinite(distance) ? `距目的地约 ${formatMeters(distance)}` : '';
+  }
+  if (last?.kind === 'bus') return `${last.label || last.name || '公交'} 下车`;
+  return '';
+}
+
+function toTransitExit(raw, anchor) {
+  if (!raw || !Number.isFinite(raw.lat) || !Number.isFinite(raw.lng)) return null;
+  const label = exitShortName(raw.name) || raw.name;
+  if (!label) return null;
+  return {
+    name: raw.name,
+    label,
+    lat: raw.lat,
+    lng: raw.lng,
+    distance: anchor && Number.isFinite(anchor.lat) ? Math.round(distanceBetween(raw, anchor)) : null,
+  };
+}
+
+function walkLegDistance(route, fromEnd) {
+  const walks = route.legs.filter((leg) => leg.walking && Number.isFinite(leg.distance) && leg.distance > 0);
+  const leg = fromEnd ? walks[walks.length - 1] : walks[0];
+  return leg ? Math.round(leg.distance) : null;
+}
+
+function withWalkDistance(exit, distance) {
+  return exit && Number.isFinite(distance) ? { ...exit, distance } : exit;
+}
+
+function bindTransitExits(route) {
+  if (!route?.legs || !route.boarding || !route.alighting) return;
+
+  for (const leg of route.legs) {
+    if (leg.walking) continue;
+    leg.entrance = toTransitExit(leg.entrance);
+    leg.exit = toTransitExit(leg.exit);
+  }
+
+  route.boarding = {
+    ...route.boarding,
+    exit: withWalkDistance(toTransitExit(route.boarding.exit, route.points[0]), walkLegDistance(route, false)),
+  };
+  route.alighting = {
+    ...route.alighting,
+    exit: withWalkDistance(toTransitExit(route.alighting.exit, route.points[route.points.length - 1]), walkLegDistance(route, true)),
+  };
+  state.exitSide = exitSideFor(route);
+}
+
+function exitTargetOf(route, side) {
+  if (!route?.legs || !route.boarding) return null;
+  if (side === 'boarding') {
+    const leg = route.legs.find((item) => !item.walking);
+    return leg?.metro ? { stop: route.boarding, anchor: route.points[0] } : null;
+  }
+  const { last } = lastRideLegs(route);
+  return last?.metro ? { stop: route.alighting, anchor: route.points[route.points.length - 1] } : null;
+}
+
+function exitSideFor(route) {
+  if (exitTargetOf(route, 'alighting')) return 'alighting';
+  return exitTargetOf(route, 'boarding') ? 'boarding' : '';
+}
+
+function sortStopExits(items, anchor) {
+  return items
+    .map((item) => toTransitExit(item, anchor))
+    .filter((exit) => exit && exit.label)
+    .sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0));
+}
+
+function listStopExits(stop) {
+  return fetchAmapAround(stop, AMAP_TYPE_METRO_EXIT).then((items) => {
+    const related = items.filter((item) => samePoiFamily(item, { name: stop.name }));
+    return related.length ? related : items;
+  });
+}
+
+function loadRouteExits(route, side) {
+  const target = exitTargetOf(route, side);
+  if (!target) return Promise.resolve([]);
+  if (target.stop.exitsLoaded) return Promise.resolve(target.stop.exits || []);
+
+  return listStopExits(target.stop).then((items) => {
+    if (target.stop.exitsLoaded) return target.stop.exits;
+    target.stop.exitsLoaded = true;
+    target.stop.exits = sortStopExits(items, target.anchor);
+    if (!target.stop.exit && target.stop.exits.length) target.stop.exit = target.stop.exits[0];
+    return target.stop.exits;
+  });
+}
+
+function fillMissingTransitExit(route) {
+  const side = exitSideFor(route);
+  const target = exitTargetOf(route, side);
+  if (!target || target.stop.exit || target.stop.exitsLoaded) return;
+
+  loadRouteExits(route, side).then(() => {
+    if (state.route === route) renderTransitStops(route);
+  }).catch(() => {});
+}
+
+function renderRouteExits(route) {
+  const side = exitSideFor(route);
+  state.exitSide = side;
+  if (!side) {
+    els.routeExits.hidden = true;
+    els.routeExitsList.hidden = true;
+    els.routeExitsList.textContent = '';
+    return;
+  }
+
+  const stop = side === 'boarding' ? route.boarding : route.alighting;
+  const open = !els.routeExitsList.hidden;
+  els.routeExits.hidden = false;
+  els.routeExitsToggle.textContent = open ? '收起出入口' : `看 ${stop.name || '车站'} 其他出入口`;
+
+  els.routeExitsList.textContent = '';
+  els.routeExitsList.hidden = !open;
+  if (!open) return;
+
+  const exits = stop.exits || [];
+  if (!exits.length) {
+    const empty = document.createElement('li');
+    empty.textContent = stop.exitsLoaded ? '暂未找到其他出入口' : '正在获取出入口…';
+    els.routeExitsList.append(empty);
+    return;
+  }
+
+  for (const exit of exits) {
+    const item = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'text-left transition-colors hover:text-zen-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zen-ink';
+    const distance = Number.isFinite(exit.distance)
+      ? ` · ${side === 'boarding' ? '距上车点' : '距目的地'}约 ${formatMeters(exit.distance)}`
+      : '';
+    button.textContent = `${exit.label}${distance}${exit === stop.exit || exit.label === stop.exit?.label ? '（当前）' : ''}`;
+    button.addEventListener('click', () => {
+      stop.exit = exit;
+      renderTransitStops(route);
+      els.routeExitsList.hidden = false;
+      renderRouteExits(route);
+    });
+    item.append(button);
+    els.routeExitsList.append(item);
   }
 }
 
 function renderTransitCross(route) {
-  els.transitCross.hidden = !route.crossCity;
+  const show = route.crossCity || route.legs.some((leg) => leg.kind === 'railway');
+  els.transitCross.hidden = !show;
   els.transitLegs.hidden = true;
   els.transitCrossToggle.textContent = '查看分段';
-  if (!route.crossCity) return;
+  if (!show) return;
 
-  els.transitCrossText.textContent = '跨城出行建议乘高铁，普速方案仅供参考';
+  els.transitCrossText.textContent = route.crossCity ? '跨城出行建议乘高铁，普速方案仅供参考' : '含火车段，时刻与余票以 12306 为准';
   els.transitLegs.textContent = '';
   for (const leg of route.legs) {
     const item = document.createElement('li');
@@ -1225,7 +1417,10 @@ function transitLegText(leg) {
     return `${leg.name}｜${leg.fromName} ${formatAmapClock(leg.fromTime)} → ${leg.toName} ${formatAmapClock(leg.toTime)}${leg.toNextDay ? '（次日）' : ''}${distance}`;
   }
   if (leg.kind === 'taxi') return `打车｜${leg.fromName || '上车点'} → ${leg.toName || '目的地'}${distance}`;
-  return `${leg.name}｜${leg.fromName} → ${leg.toName}${distance}`;
+  const head = [leg.label || leg.name, leg.direction].filter(Boolean).join(' ');
+  const board = leg.entrance ? `${leg.fromName}（${leg.entrance.label}进）` : leg.fromName;
+  const alight = leg.exit ? `${leg.toName}（${leg.exit.label}出）` : leg.toName;
+  return `${head}｜${board} → ${alight}${distance}`;
 }
 
 function drawRoute(route) {
@@ -1432,6 +1627,7 @@ function feedReminder(fix) {
   if (!state.route || !state.engine) return;
   const result = state.engine.evaluate(fix);
   if (!result || result.skipped) return;
+  state.remindResult = result;
   updateRemindStatus(result);
   if (result.alert) fireAlert(result.alert);
 }
@@ -1447,8 +1643,8 @@ function updateRemindStatus(result) {
     return;
   }
   const parts = [];
-  if (!result.boarded) parts.push(`距上车站 ${formatMeters(result.boardingRemaining)}`);
-  parts.push(`距下车站 ${formatMeters(result.alightingRemaining)}`);
+  if (!result.boarded) parts.push(`距上车站 ${formatMeters(result.boardingRemaining)} · 距下车站 ${formatMeters(result.alightingRemaining)}`);
+  else parts.push(nextStopText() || `距下车站 ${formatMeters(result.alightingRemaining)}`);
   els.remindStatus.textContent = parts.join(' · ');
 }
 
@@ -1474,10 +1670,15 @@ function showBanner(title, sub) {
 
 function fireAlert(kind) {
   if (!state.route) return;
-  const stop = kind === 'boarding' ? state.route.boarding : state.route.alighting;
-  const name = stop.name || (kind === 'boarding' ? '上车站' : '下车站');
-  const title = kind === 'boarding' ? '准备上车' : '即将到站';
-  const sub = kind === 'boarding' ? `${name} · 请前往上车站` : `${name} · 请准备下车`;
+  const boarding = kind === 'boarding';
+  const stop = boarding ? state.route.boarding : state.route.alighting;
+  const name = stop.name || (boarding ? '上车站' : '下车站');
+  const title = boarding ? '准备上车' : '即将到站';
+  const label = stop.exit?.label || '';
+  const hint = Number.isFinite(stop.exit?.distance)
+    ? (boarding ? `步行到${label}约 ${formatMeters(stop.exit.distance)}` : `距目的地约 ${formatMeters(stop.exit.distance)}`)
+    : (boarding ? '请前往上车站' : '请准备下车');
+  const sub = label ? `${name} ${label}${boarding ? '进' : '出'} · ${hint}` : `${name} · ${hint}`;
 
   showBanner(title, sub);
   const canVibrate = !navigator.userActivation || navigator.userActivation.hasBeenActive;
@@ -1486,7 +1687,7 @@ function fireAlert(kind) {
       navigator.vibrate([300, 120, 300]);
     } catch {}
   }
-  speak(kind === 'boarding' ? `请准备上车，${name}` : `即将到站，${name}，请准备下车`);
+  speak(boarding ? `请准备上车，${name}${label ? `，从${label}进` : ''}` : `即将到站，${name}${label ? `，从${label}出` : ''}，请准备下车`);
 }
 
 function speak(text) {
@@ -1733,10 +1934,23 @@ function legGuidance(leg, into, length) {
   }
   if (!leg.walking) {
     const via = leg.viaNum ? ` · 途经 ${leg.viaNum} 站` : '';
+    const next = leg.stops?.length ? nextStopText() : '';
+    if (next) return next;
     return `乘 ${leg.label || leg.name}${via}，在 ${leg.toName || '下车站'} 下车`;
   }
   const span = leg.distance || length;
   return nextWalkStep(leg, into) || `步行 ${formatMeters(Math.max(0, span - into))} 至 ${leg.to || '目的地'}`;
+}
+
+function nextStopText() {
+  const info = state.remindResult;
+  const next = info && info.boarded ? info.nextStop : null;
+  if (!next) return '';
+  if (next.kind === 'alight') {
+    return next.exit?.label ? `下一站 ${next.name} · ${next.exit.label}出` : `下一站 ${next.name} · 到站请下车`;
+  }
+  if (next.kind === 'transfer') return `下一站 ${next.name} · 到站换乘`;
+  return `下一站 ${next.name} · 还有 ${info.stopsLeft} 站`;
 }
 
 function nextWalkStep(leg, into) {
@@ -1799,6 +2013,24 @@ function bindTransitUI() {
     const open = els.transitLegs.hidden;
     els.transitLegs.hidden = !open;
     els.transitCrossToggle.textContent = open ? '收起分段' : '查看分段';
+  });
+
+  els.routeExitsToggle.addEventListener('click', () => {
+    const route = state.route;
+    if (!route || !state.exitSide) return;
+    const open = els.routeExitsList.hidden;
+    els.routeExitsList.hidden = !open;
+    renderRouteExits(route);
+    if (!open) return;
+    loadRouteExits(route, state.exitSide).then(() => {
+      if (state.route === route) renderRouteExits(route);
+    }).catch(() => {
+      if (state.route !== route) return;
+      els.routeExitsList.textContent = '';
+      const item = document.createElement('li');
+      item.textContent = '出入口信息暂不可用';
+      els.routeExitsList.append(item);
+    });
   });
 
   els.threshold.addEventListener('change', () => {
@@ -2236,6 +2468,9 @@ function hideMapSkeleton() {
 function mountRouteChrome() {
   els.routeTitle.textContent = MODE_TITLE[trip.mode] || '路线';
   els.routeStops.hidden = !isTransit();
+  els.routeExits.hidden = true;
+  els.routeExitsList.hidden = true;
+  els.routeExitsList.textContent = '';
   els.transitCross.hidden = true;
   els.routeRemind.hidden = !isTransit();
   els.remindStatus.hidden = !isTransit();

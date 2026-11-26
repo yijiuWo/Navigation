@@ -29,7 +29,12 @@ function parseAmapCoord(value) {
 function parseAmapStop(stop) {
   const point = parseAmapCoord(stop?.location);
   if (!point) return null;
-  return { name: typeof stop.name === 'string' ? stop.name : '', lat: point.lat, lng: point.lng };
+  return { name: amapText(stop.name), id: amapText(stop.id), lat: point.lat, lng: point.lng };
+}
+
+function parseAmapStopList(stops) {
+  if (!Array.isArray(stops)) return [];
+  return stops.map(parseAmapStop).filter((stop) => stop && stop.name);
 }
 
 function amapText(value) {
@@ -41,8 +46,14 @@ function amapNumber(value) {
   return Number.isFinite(num) ? num : 0;
 }
 
-function stripLineParen(name) {
-  return amapText(name).replace(/[（(][^）)]*[)）]/g, '').trim();
+function amapLineParts(name) {
+  const raw = amapText(name).trim();
+  const open = raw.search(/[（(]/);
+  if (open < 0) return { label: raw, direction: '' };
+  const body = raw.slice(open).replace(/[（()）]/g, '');
+  const legsOf = body.split('--');
+  const terminus = (legsOf.length > 1 ? legsOf[legsOf.length - 1] : '').trim();
+  return { label: raw.slice(0, open).trim(), direction: terminus ? `${terminus}方向` : '' };
 }
 
 function parseAmapSteps(steps) {
@@ -143,7 +154,7 @@ function normalizeTransit(transit, destinationName = '', index = 0) {
       const to = parseAmapStop(line.arrival_stop);
       let points = parseAmapPolyline(line.polyline);
       if (points.length < 2 && from && to) points = [from, to];
-      const label = stripLineParen(line.name);
+      const { label, direction } = amapLineParts(line.name);
       if (points.length > 1) legs.push({
         walking: false,
         kind: 'bus',
@@ -152,8 +163,16 @@ function normalizeTransit(transit, destinationName = '', index = 0) {
         label,
         metro: TRANSIT_METRO_TYPE.test(`${line.type || ''}${label}`),
         viaNum: amapNumber(line.via_num),
+        from,
+        to,
+        fromId: from?.id || '',
+        toId: to?.id || '',
         fromName: from?.name || '',
         toName: to?.name || '',
+        direction,
+        stops: parseAmapStopList(line.via_stops),
+        entrance: parseAmapStop(segment.entrance),
+        exit: parseAmapStop(segment.exit),
         distance: amapNumber(line.distance),
       });
       if (!boarding && from) boarding = from;
@@ -165,15 +184,23 @@ function normalizeTransit(transit, destinationName = '', index = 0) {
       const from = parseAmapStop(railway.departure_stop);
       const to = parseAmapStop(railway.arrival_stop);
       if (from && to) {
+        const railLine = amapLineParts(railway.name || railway.trip);
         legs.push({
           walking: false,
           kind: 'railway',
           points: [from, to],
           name: railway.trip || railway.name || '火车',
           trip: railway.trip || '',
-          label: stripLineParen(railway.name || railway.trip) || '火车',
+          label: railLine.label || '火车',
+          from,
+          to,
+          fromId: from.id,
+          toId: to.id,
           fromName: from.name,
           toName: to.name,
+          stops: parseAmapStopList(railway.via_stops),
+          entrance: parseAmapStop(segment.entrance),
+          exit: parseAmapStop(segment.exit),
           distance: amapNumber(railway.distance),
           fromTime: amapText(railway.departure_stop?.time),
           toTime: amapText(railway.arrival_stop?.time),
@@ -196,9 +223,12 @@ function normalizeTransit(transit, destinationName = '', index = 0) {
           points: [from, to],
           name: '打车',
           label: '打车',
-          distance: amapNumber(taxi.distance),
+          from: { name: amapText(taxi.sname), id: '', lat: from.lat, lng: from.lng },
+          to: { name: label, id: '', lat: to.lat, lng: to.lng },
           fromName: amapText(taxi.sname),
           toName: label,
+          stops: [],
+          distance: amapNumber(taxi.distance),
         });
         if (!boarding) boarding = from;
         alighting = { name: label, lat: to.lat, lng: to.lng };
@@ -218,6 +248,8 @@ function normalizeTransit(transit, destinationName = '', index = 0) {
   const { cum, total } = buildRouteMetrics(points);
   const rides = legs.filter((leg) => !leg.walking);
   const modeTags = transitModeTags(legs);
+  const boardLeg = rides[0];
+  const alightLeg = rides[rides.length - 1];
 
   return {
     id: TRANSIT_PLAN_NAMES[index] || `方案${index + 1}`,
@@ -226,8 +258,8 @@ function normalizeTransit(transit, destinationName = '', index = 0) {
     points,
     cum,
     total,
-    boarding: { ...boarding, along: alongOfPoint(points, cum, boarding) },
-    alighting: { ...alighting, along: alongOfPoint(points, cum, alighting) },
+    boarding: { ...boarding, along: alongOfPoint(points, cum, boarding), exit: boardLeg?.entrance || null, exits: [] },
+    alighting: { ...alighting, along: alongOfPoint(points, cum, alighting), exit: alightLeg?.exit || null, exits: [] },
     duration: amapNumber(transit.duration),
     walkingDistance: amapNumber(transit.walking_distance),
     totalDistance: amapNumber(transit.distance),
@@ -281,8 +313,8 @@ function buildDemoRoute(origin, destination) {
     points,
     cum,
     total,
-    boarding: { name: '演示上车站', lat: board.point.lat, lng: board.point.lng, along: boardAlong },
-    alighting: { name: '演示下车站', lat: alight.point.lat, lng: alight.point.lng, along: alightAlong },
+    boarding: { name: '演示上车站', id: '', lat: board.point.lat, lng: board.point.lng, along: boardAlong, exit: null, exits: [] },
+    alighting: { name: '演示下车站', id: '', lat: alight.point.lat, lng: alight.point.lng, along: alightAlong, exit: null, exits: [] },
     duration,
     walkingDistance,
     totalDistance: total,
