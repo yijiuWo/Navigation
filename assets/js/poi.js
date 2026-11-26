@@ -215,11 +215,10 @@ function fetchAmapAround(coord, types) {
 function exitShortName(name) {
   const raw = poiNameKey(name);
   if (!raw) return '';
-  const letter = raw.match(/([A-Za-z0-9])(?:号)?(?:出入口|出口|入口|口)$/);
+  const letter = raw.match(/([A-Za-z]+\d*|\d+)(?:号)?(?:出入口|出口|入口|口)$/);
   if (letter) return `${letter[1]}口`;
   const afterStation = raw.match(/站(.+)$/);
-  if (afterStation) return afterStation[1];
-  return raw;
+  return afterStation ? afterStation[1] : '';
 }
 
 async function searchPhotonPoi(query, cityName) {

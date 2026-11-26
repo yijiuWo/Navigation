@@ -50,7 +50,7 @@ function amapLineParts(name) {
   const raw = amapText(name).trim();
   const open = raw.search(/[（(]/);
   if (open < 0) return { label: raw, direction: '' };
-  const body = raw.slice(open).replace(/[（()）]/g, '');
+  const body = raw.slice(open + 1).replace(/[)）]\s*$/, '').replace(/[（(][^（()）]*[)）]/g, '');
   const legsOf = body.split('--');
   const terminus = (legsOf.length > 1 ? legsOf[legsOf.length - 1] : '').trim();
   return { label: raw.slice(0, open).trim(), direction: terminus ? `${terminus}方向` : '' };

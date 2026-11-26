@@ -1253,7 +1253,7 @@ function alightHintText(route, last, taxi) {
 
 function toTransitExit(raw, anchor) {
   if (!raw || !Number.isFinite(raw.lat) || !Number.isFinite(raw.lng)) return null;
-  const label = exitShortName(raw.name) || raw.name;
+  const label = exitShortName(raw.name);
   if (!label) return null;
   return {
     name: raw.name,
@@ -1317,10 +1317,7 @@ function sortStopExits(items, anchor) {
 }
 
 function listStopExits(stop) {
-  return fetchAmapAround(stop, AMAP_TYPE_METRO_EXIT).then((items) => {
-    const related = items.filter((item) => samePoiFamily(item, { name: stop.name }));
-    return related.length ? related : items;
-  });
+  return fetchAmapAround(stop, AMAP_TYPE_METRO_EXIT).then((items) => items.filter((item) => samePoiFamily(item, { name: stop.name })));
 }
 
 function loadRouteExits(route, side) {
@@ -1369,7 +1366,7 @@ function renderRouteExits(route) {
   const exits = stop.exits || [];
   if (!exits.length) {
     const empty = document.createElement('li');
-    empty.textContent = stop.exitsLoaded ? '暂未找到其他出入口' : '正在获取出入口…';
+    empty.textContent = stop.exitsLoaded ? `暂未找到${stop.name || '该站'}出入口` : '正在获取出入口…';
     els.routeExitsList.append(empty);
     return;
   }
