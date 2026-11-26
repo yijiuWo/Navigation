@@ -289,6 +289,7 @@ const state = {
   transitPending: false,
   bannerTimer: 0,
   nav: { mode: 'off', offHits: 0, lastPan: 0, rerouting: false, view: null },
+  heading: { value: null, enabled: false, source: '', timer: 0, raf: 0, lastPaint: 0 },
   engine: null,
   fuel: { loading: false, key: '', list: [], selectedId: '', layers: [] },
   weather: { loading: false, key: '', failedAt: 0 },
@@ -301,6 +302,7 @@ let accuracyCircle = null;
 let originIcon = null;
 let manualIcon = null;
 let destinationIcon = null;
+let headingIcon = null;
 let tileLayer = null;
 let tileErrors = 0;
 let tileProbed = false;
@@ -435,8 +437,8 @@ function stopWatch() {
 
 function onFix(position) {
   if (!els.form.hidden) return;
-  const { latitude: lat, longitude: lng, accuracy } = position.coords;
-  const fix = { lat, lng, accuracy, timestamp: position.timestamp || Date.now() };
+  const { latitude: lat, longitude: lng, accuracy, heading, speed } = position.coords;
+  const fix = { lat, lng, accuracy, heading, speed, timestamp: position.timestamp || Date.now() };
   state.lastFix = fix;
   setOrigin(L.latLng(lat, lng), { manual: false, accuracy });
   render('ok', { accuracy: Math.round(accuracy) });
@@ -465,16 +467,17 @@ function onGeoError(error) {
 function setOrigin(latlng, { manual, accuracy = 0 }) {
   state.origin = latlng;
   state.originManual = manual;
+  const icon = originMarkerIcon(manual);
 
   if (!originMarker) {
     originMarker = L.marker(latlng, {
-      icon: manual ? manualIcon : originIcon,
+      icon,
       keyboard: false,
       zIndexOffset: 400,
     }).addTo(map);
   } else {
     originMarker.setLatLng(latlng);
-    originMarker.setIcon(manual ? manualIcon : originIcon);
+    if (originMarker.options.icon !== icon) originMarker.setIcon(icon);
   }
 
   if (manual || accuracy <= 0) {
@@ -1533,6 +1536,7 @@ function startNavigation() {
   syncStartNavButton();
   if (state.lastFix) followNavPosition(state.lastFix);
   updateNavigation(state.lastFix);
+  startHeadingTrack();
 }
 
 function stopNavigation() {
@@ -1546,9 +1550,90 @@ function stopNavigation() {
   syncStartNavButton();
   window.clearTimeout(state.bannerTimer);
   els.banner.hidden = true;
+  stopHeadingTrack();
   const view = state.nav.view;
   state.nav.view = null;
   if (view) map.setView(view.center, view.zoom, { animate: false });
+}
+
+function originMarkerIcon(manual) {
+  if (state.nav.mode !== 'off' && state.heading.enabled) return headingIcon;
+  return manual ? manualIcon : originIcon;
+}
+
+function startHeadingTrack() {
+  if (typeof DeviceOrientationEvent === 'undefined') return;
+  state.heading.enabled = true;
+  state.heading.value = null;
+  state.heading.source = '';
+  if (originMarker && originMarker.options.icon !== headingIcon) originMarker.setIcon(headingIcon);
+  window.addEventListener('deviceorientationabsolute', onHeadingEvent, true);
+  state.heading.timer = window.setTimeout(() => {
+    if (!state.heading.source) window.addEventListener('deviceorientation', onHeadingEvent, true);
+  }, 3000);
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission()
+      .then((result) => {
+        if (result !== 'granted' && state.nav.mode !== 'off') stopHeadingTrack();
+      })
+      .catch(() => {
+        if (state.nav.mode !== 'off') stopHeadingTrack();
+      });
+  }
+}
+
+function stopHeadingTrack() {
+  state.heading.enabled = false;
+  state.heading.value = null;
+  state.heading.source = '';
+  window.clearTimeout(state.heading.timer);
+  state.heading.timer = 0;
+  if (state.heading.raf) window.cancelAnimationFrame(state.heading.raf);
+  state.heading.raf = 0;
+  window.removeEventListener('deviceorientationabsolute', onHeadingEvent, true);
+  window.removeEventListener('deviceorientation', onHeadingEvent, true);
+  if (originMarker) originMarker.setIcon(state.originManual ? manualIcon : originIcon);
+}
+
+function onHeadingEvent(event) {
+  if (state.nav.mode === 'off' || !state.heading.enabled) return;
+  let heading = null;
+  if (Number.isFinite(event.webkitCompassHeading)) {
+    heading = event.webkitCompassHeading;
+    state.heading.source = 'compass';
+  } else if (Number.isFinite(event.alpha) && (event.type === 'deviceorientationabsolute' || event.absolute === true)) {
+    heading = (360 - event.alpha) % 360;
+    if (!state.heading.source) state.heading.source = 'alpha';
+  }
+  if (heading == null) return;
+
+  const screenAngle = Number(screen.orientation?.angle) || 0;
+  state.heading.value = (heading + screenAngle + 360) % 360;
+  scheduleHeadingPaint();
+}
+
+function scheduleHeadingPaint() {
+  if (state.heading.raf) return;
+  state.heading.raf = window.requestAnimationFrame(paintHeading);
+}
+
+function paintHeading() {
+  state.heading.raf = 0;
+  const now = performance.now();
+  if (now - state.heading.lastPaint < 95) {
+    scheduleHeadingPaint();
+    return;
+  }
+  state.heading.lastPaint = now;
+  applyHeadingMarker(state.heading.value);
+}
+
+function applyHeadingMarker(value) {
+  if (!Number.isFinite(value) || !originMarker) return;
+  const cone = originMarker.getElement()?.querySelector('.zen-marker-cone');
+  if (!cone) return;
+  if (cone.hidden) cone.hidden = false;
+  cone.style.transform = `rotate(${value.toFixed(1)}deg)`;
 }
 
 function followNavPosition(fix) {
@@ -1570,6 +1655,11 @@ function updateNavigation(fix) {
   const projection = projectOnRoute(route.points, route.cum, fix);
   const remaining = Math.max(0, route.total - projection.along);
   const accurate = Number.isFinite(fix.accuracy) && fix.accuracy <= NAV_ACCURACY_LIMIT;
+
+  if (state.heading.enabled && !state.heading.source && Number.isFinite(fix.heading) && Number(fix.speed) > 1) {
+    state.heading.value = fix.heading;
+    scheduleHeadingPaint();
+  }
 
   if (accurate && (state.nav.mode === 'following' || state.nav.mode === 'off-route')) {
     const drifted = projection.offset > (state.nav.mode === 'off-route' ? NAV_RECOVER_LIMIT : NAV_OFF_LIMIT);
@@ -2171,6 +2261,12 @@ function boot() {
   originIcon = L.divIcon({ className: '', html: '<span class="zen-marker-dot"></span>', iconSize: [14, 14], iconAnchor: [7, 7] });
   manualIcon = L.divIcon({ className: '', html: '<span class="zen-marker-manual"></span>', iconSize: [14, 14], iconAnchor: [7, 7] });
   destinationIcon = L.divIcon({ className: '', html: '<span class="zen-marker-dest"></span>', iconSize: [14, 14], iconAnchor: [7, 7] });
+  headingIcon = L.divIcon({
+    className: '',
+    html: '<span class="zen-marker-head"><span class="zen-marker-cone" hidden><svg viewBox="0 0 44 44" aria-hidden="true"><defs><linearGradient id="zen-head-grad" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="currentColor" stop-opacity="0.5"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><path d="M22 44 L2 9.36 A40 40 0 0 1 42 9.36 Z" fill="url(#zen-head-grad)"/></svg></span><span class="zen-marker-core"></span></span>',
+    iconSize: [56, 56],
+    iconAnchor: [28, 28],
+  });
 
   state.engine = createReminderEngine({ threshold: initialThreshold() });
 
