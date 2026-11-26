@@ -210,8 +210,14 @@ function groupStrongMatches(group, query, cityName) {
   return group.members.some((member) => poiNameScore(member.name, query, cityName) <= 1);
 }
 
+function groupInCityName(group, cityName) {
+  const target = poiNameKey(cityName);
+  if (!target) return true;
+  return [group.city, group.province, group.district].some((value) => poiNameKey(value) === target);
+}
+
 async function buildPoiCandidates(query, { cityName, wide: prefetched } = {}) {
-  if (prefetched && (!cityName || prefetched.groups.some((group) => groupStrongMatches(group, query, '')))) {
+  if (prefetched && (!cityName || prefetched.groups.some((group) => groupStrongMatches(group, query, '') && groupInCityName(group, cityName)))) {
     return prefetched;
   }
 

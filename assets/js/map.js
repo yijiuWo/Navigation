@@ -661,7 +661,7 @@ async function geocode(query) {
 }
 
 function pickPlace(result, cityName = '') {
-  const noPick = !cityName && !state.origin && Boolean(result.crossCity);
+  const noPick = !cityName && !state.origin;
   const ranked = rankPoiGroups(result.groups, state.origin, { noPick });
   if (!ranked.list.length) throw new Error('geocode-empty');
   const picked = ranked.list[ranked.selected] ?? ranked.list[0];
