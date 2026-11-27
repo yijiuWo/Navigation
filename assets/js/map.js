@@ -96,6 +96,8 @@ const THRESHOLD_KEY = 'zenmap:threshold';
 const GEO_TTL = 7 * 24 * 60 * 60 * 1000;
 const ROUTE_TTL = 30 * 60 * 1000;
 const FUEL_TTL = 30 * 60 * 1000;
+const FUEL_OFFSET_LIMIT = 1000;
+const FUEL_BEHIND_TOLERANCE = 100;
 const WEATHER_TTL = 20 * 60 * 1000;
 const WEATHER_RETRY_COOLDOWN = 60 * 1000;
 const WEATHER_SCORE_TIMEOUT = 2500;
@@ -1169,6 +1171,7 @@ function applyRoute(route, demoReason) {
   if (state.lastFix) feedReminder(state.lastFix);
   syncStartNavButton();
   fillMissingTransitExit(route);
+  if (isDrive() && !els.gasPanel.hidden) loadFuel();
 }
 
 function renderRouteInfo(route, demoReason) {
@@ -1352,8 +1355,8 @@ function exitTargetOf(route, side) {
 }
 
 function exitSideFor(route) {
-  if (exitTargetOf(route, 'alighting')) return 'alighting';
-  return exitTargetOf(route, 'boarding') ? 'boarding' : '';
+  if (exitTargetOf(route, 'boarding')) return 'boarding';
+  return exitTargetOf(route, 'alighting') ? 'alighting' : '';
 }
 
 function sortStopExits(items, anchor) {
@@ -1420,7 +1423,7 @@ function renderRouteExits(route) {
     return;
   }
 
-  const reach = side === 'boarding' ? '距上车点' : '距目的地';
+  const reach = side === 'boarding' ? '距起点' : '距目的地';
   for (const exit of exits) {
     els.routeExitsList.append(buildExitRow(route, stop, exit, side, reach));
   }
@@ -2480,21 +2483,6 @@ function bindTransitUI() {
   });
 }
 
-function bearingBetween(from, to) {
-  const toRad = Math.PI / 180;
-  const dLng = (to.lng - from.lng) * toRad;
-  const lat1 = from.lat * toRad;
-  const lat2 = to.lat * toRad;
-  const y = Math.sin(dLng) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
-  return ((Math.atan2(y, x) / toRad) + 360) % 360;
-}
-
-function angleDelta(a, b) {
-  const diff = Math.abs(a - b) % 360;
-  return diff > 180 ? 360 - diff : diff;
-}
-
 function bindFuel() {
   if (trip?.mode !== 'drive') return;
   els.gasBtn.hidden = false;
@@ -2515,6 +2503,43 @@ function toggleGasPanel(open = els.gasPanel.hidden) {
   loadFuel();
 }
 
+function fuelRoute() {
+  const route = ensureRouteMetrics(activeRoute());
+  return route && Array.isArray(route.points) && route.points.length >= 2 ? route : null;
+}
+
+function fuelNavigating() {
+  return state.nav.mode === 'following' || state.nav.mode === 'off-route';
+}
+
+function fuelReferencePoint() {
+  return fuelNavigating() && Number.isFinite(state.lastFix?.lat) ? state.lastFix : state.origin;
+}
+
+function fuelRouteStamp(route) {
+  const step = Math.max(1, Math.floor(route.points.length / 16));
+  let hash = 0;
+  for (let i = 0; i < route.points.length; i += step) {
+    hash = (hash * 33 + Math.round(route.points[i].lat * 1e4)) | 0;
+    hash = (hash * 33 + Math.round(route.points[i].lng * 1e4)) | 0;
+  }
+  return `${Math.round(route.total / 100) * 100}:${hash}`;
+}
+
+function fuelCacheKey(anchor, route) {
+  if (route && state.origin && state.dest) {
+    return [
+      'zenmap:fuel:v3',
+      state.origin.lat.toFixed(3),
+      state.origin.lng.toFixed(3),
+      state.dest.lat.toFixed(3),
+      state.dest.lng.toFixed(3),
+      fuelRouteStamp(route),
+    ].join(':');
+  }
+  return `zenmap:fuel:v3:${anchor.lat.toFixed(3)},${anchor.lng.toFixed(3)}`;
+}
+
 async function loadFuel(force = false) {
   if (trip?.mode !== 'drive' || state.fuel.loading) return;
   const anchor = state.origin || state.dest;
@@ -2522,15 +2547,18 @@ async function loadFuel(force = false) {
     els.gasStatus.textContent = '先确定起点再查找加油站';
     return;
   }
-  if (state.fuel.key && !force) {
+
+  const route = fuelRoute();
+  const cacheKey = fuelCacheKey(anchor, route);
+
+  if (state.fuel.key === cacheKey && !force) {
     renderFuelList();
     return;
   }
 
   state.fuel.loading = true;
-  els.gasStatus.textContent = '正在查找附近加油站…';
+  els.gasStatus.textContent = route ? '正在沿路线查找加油站…' : '正在查找附近加油站…';
 
-  const cacheKey = `zenmap:fuel:v1:${anchor.lat.toFixed(3)},${anchor.lng.toFixed(3)}`;
   try {
     const cached = force ? null : ZenStore.get(cacheKey, FUEL_TTL);
     if (cached !== null) {
@@ -2540,7 +2568,9 @@ async function loadFuel(force = false) {
       return;
     }
     try {
-      const stations = await fetchFuelStations({ lat: anchor.lat, lng: anchor.lng });
+      const stations = route
+        ? await fetchFuelStations({ points: route.points, lat: anchor.lat, lng: anchor.lng })
+        : await fetchFuelStations({ lat: anchor.lat, lng: anchor.lng });
       ZenStore.set(cacheKey, stations);
       state.fuel.key = cacheKey;
       state.fuel.list = stations;
@@ -2560,36 +2590,51 @@ async function loadFuel(force = false) {
   }
 }
 
+function fuelCurrentAlong(route) {
+  const point = fuelReferencePoint();
+  return point ? projectOnRoute(route.points, route.cum, point).along : 0;
+}
+
 function rankFuelStations(stations) {
-  const anchor = state.origin || state.dest;
-  if (!anchor) return [];
+  const route = fuelRoute();
 
-  const hasDirection = Boolean(state.dest && distanceBetween(anchor, state.dest) > 80);
-  const destBearing = hasDirection ? bearingBetween(anchor, state.dest) : null;
+  if (!route) {
+    const anchor = state.origin || state.dest;
+    if (!anchor) return [];
+    return stations
+      .map((station) => ({ ...station, distance: distanceBetween(anchor, station) }))
+      .filter((station) => Number.isFinite(station.distance) && station.distance <= 4000)
+      .sort((a, b) => a.distance - b.distance);
+  }
 
+  const currentAlong = fuelCurrentAlong(route);
   return stations
     .map((station) => {
-      const distance = distanceBetween(anchor, station);
-      const ahead = destBearing !== null && angleDelta(bearingBetween(anchor, station), destBearing) <= 75;
-      return { ...station, distance, ahead };
+      const { along, offset } = projectOnRoute(route.points, route.cum, station);
+      return { ...station, along, offset, aheadDistance: along - currentAlong };
     })
-    .filter((station) => Number.isFinite(station.distance) && station.distance <= 4000)
-    .sort((a, b) => Number(b.ahead) - Number(a.ahead) || a.distance - b.distance);
+    .filter((station) => station.offset <= FUEL_OFFSET_LIMIT && station.aheadDistance > -FUEL_BEHIND_TOLERANCE)
+    .sort((a, b) => a.aheadDistance - b.aheadDistance || a.offset - b.offset);
+}
+
+function fuelMetaText(station) {
+  const detour = station.offset >= 200 ? ` · 偏离 ${formatMeters(station.offset)}` : '';
+  return station.aheadDistance > 0 ? `前方 ${formatMeters(station.aheadDistance)}${detour}` : `刚经过${detour}`;
 }
 
 function renderFuelList() {
   const stations = rankFuelStations(state.fuel.list);
-  const hasDirection = Boolean(state.origin && state.dest && distanceBetween(state.origin, state.dest) > 80);
+  const routed = Boolean(fuelRoute());
   els.gasList.innerHTML = '';
 
   if (!stations.length) {
-    els.gasStatus.textContent = '4 km 内没有找到加油站';
+    els.gasStatus.textContent = routed ? '路线 1 km 内没有顺路加油站' : '4 km 内没有找到加油站';
     return;
   }
 
-  const ahead = stations.filter((station) => station.ahead).length;
-  els.gasStatus.textContent = hasDirection
-    ? `4 km 内 ${stations.length} 个 · 前方 ${ahead} 个`
+  const nearest = stations[0].aheadDistance;
+  els.gasStatus.textContent = routed
+    ? `顺路 ${stations.length} 个${nearest > 0 ? ` · 最近 ${formatMeters(nearest)}` : ''}`
     : `4 km 内 ${stations.length} 个`;
 
   for (const station of stations.slice(0, 8)) {
@@ -2606,7 +2651,7 @@ function renderFuelList() {
 
     const meta = document.createElement('span');
     meta.className = 'gas-meta shrink-0 text-xs text-zen-ghost';
-    meta.textContent = `${formatMeters(station.distance)}${station.ahead ? ' · 前方' : ''}`;
+    meta.textContent = routed ? fuelMetaText(station) : formatMeters(station.distance);
 
     button.append(name, meta);
     button.addEventListener('click', () => selectFuelStation(station));
@@ -2615,9 +2660,17 @@ function renderFuelList() {
   }
 }
 
+function fuelStartPoint(route) {
+  const anchor = state.origin || state.dest;
+  if (!route || !anchor) return anchor;
+  const reference = fuelReferencePoint() || anchor;
+  const { along } = projectOnRoute(route.points, route.cum, reference);
+  return pointAtAlong(route.points, route.cum, along).point;
+}
+
 function selectFuelStation(station) {
-  const from = state.origin || state.dest;
-  if (!from) return;
+  if (!state.origin && !state.dest) return;
+  const from = fuelStartPoint(fuelRoute()) || state.origin || state.dest;
 
   state.fuel.selectedId = station.id;
   clearFuelLayers();
