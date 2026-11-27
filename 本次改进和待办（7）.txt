@@ -157,29 +157,48 @@ P0 赛前必做（不是代码，最影响评分）
 3. 发布后线上核对：map.js 104246、drive.js 5841、zen.css 19746、map.html 17689，
    四个文件逐个 curl 比对字节数；线上 map.js 应含 navGuide 与 wakeLock
 
-P1 体验（代码小修，可一轮打包）
-4. 上车口也能展开切换：现在 exitSideFor 优先 alighting，两端都地铁时上车口只显示、不能切换
-5. 切换口后距离口径统一：默认口是步行距离、切换后是直线距离，数字语义不一致，需标注「直线」或统一口径
-6. 公交态引导卡：本轮公交直接隐藏 #nav-guide（沿用 #nav-leg 的「下一站」），若要显示需先定两套文案的口径
-7. 转向距离口径：turns.along 用 OSRM step 距离累加，projection.along 用本地 haversine 累加，
+P1 体验（可一轮打包；第 4 条是新功能，其余是小修）
+4. 地铁口 / 公交上车站的「带我去」入口导航（新功能，缺）
+   问题：卡片现在能回答「从 C 口进」，但回答不了「C 口在哪」。口只是一个名字，
+   到了楼下找不到入口，路线就等于断在最后一个路口。公交上车站同理（只知道站名，不知道站台在哪一侧）。
+   数据其实已经齐了，不需要新接口：
+   - 地铁口：toTransitExit 保留了 raw.lat / raw.lng，exit 对象上就有坐标
+   - 公交站：route.boarding 由 parseAmapStop 生成，带 lat / lng（高德 departure_stop.location）
+   缺的只是「点到点步行引导」这一层 UI 和状态。
+   建议的最小实现：
+   a. 出入口卡片上，在「C口 · 步行 320 米」旁加一个小按钮（箭头图标 /「带我去」），
+      只在 exit.lat、lng 有效时渲染，坐标缺失就不给按钮，不要给点了没反应的按钮
+   b. 点击 → 起点取当前定位（无定位退回路线起点）→ 复用现有 OSRM foot 链路（已带 steps=true）
+      生成一条短步行路线，直接进 following 导航态
+   c. 状态标记 state.nav.linkTo = 'exit' / 'stop'，退出时恢复原来那条主路线，
+      不能把主路线覆盖掉——用户可能中途放弃，必须能一键回到原路线
+   d. 到口 30 米内播「已到 C 口，请进站」；公交播「已到 XX 站，请上车」
+   e. 公交要放开 exitTargetOf：目前只认 leg.metro，上车站被排除在外；
+      直接拿 route.boarding 的坐标当终点即可，不需要 around 查口
+   边界：切换口的按钮（P1-5）和这个「带我去」是两个动作，别混成一个；
+       口列表展开时每个口都应能单独导航
+5. 上车口也能展开切换：现在 exitSideFor 优先 alighting，两端都地铁时上车口只显示、不能切换
+6. 切换口后距离口径统一：默认口是步行距离、切换后是直线距离，数字语义不一致，需标注「直线」或统一口径
+7. 公交态引导卡：本轮公交直接隐藏 #nav-guide（沿用 #nav-leg 的「下一站」），若要显示需先定两套文案的口径
+8. 转向距离口径：turns.along 用 OSRM step 距离累加，projection.along 用本地 haversine 累加，
    长路线会有偏差（16.4km 实测差 28 米），要统一到一套里程上
-8. 暗色主色对比度（实测缺陷）：暗色块 --z-accent 改回 #0a84ff（或两主题统一一个值），
+9. 暗色主色对比度（实测缺陷）：暗色块 --z-accent 改回 #0a84ff（或两主题统一一个值），
    新增 --z-accent-ink: #ffffff 并用到 .zen-option-active 与 .zen-cand-sub，替代现在的 var(--z-surface)；
    --z-accent-soft 从 --z-fill 的灰色副本改成 rgba(10,132,255,.12)，让 zen.css 221/246/623 三处底色吃上主色
-9. 读屏器刷屏（实测缺陷）：#nav-guide 上的 role="status" aria-live="polite" 挂在整个卡片，
-   距离每秒重写一次，VoiceOver/TalkBack 会连续念。改法：容器去掉 role/aria-live，
-   只给 #nav-guide-action 加，并在赋值前判等（值没变就不写）
-10. iOS 静音拨片会静音 Web Speech，且网页无法检测当前是否静音：
+10. 读屏器刷屏（实测缺陷）：#nav-guide 上的 role="status" aria-live="polite" 挂在整个卡片，
+    距离每秒重写一次，VoiceOver/TalkBack 会连续念。改法：容器去掉 role/aria-live，
+    只给 #nav-guide-action 加，并在赋值前判等（值没变就不写）
+11. iOS 静音拨片会静音 Web Speech，且网页无法检测当前是否静音：
     开始导航的横幅文案补一句「请确认手机未静音」，或首次导航时提示一次
 
 P2 提分项
-11. 地名解析提速：buildPoiCandidates 把 wideTask 以 Promise 传入，本城搜索失败才 await，约 920ms → 300ms
+12. 地名解析提速：buildPoiCandidates 把 wideTask 以 Promise 传入，本城搜索失败才 await，约 920ms → 300ms
 
 P3 锦上添花
-12. 到站提醒中间站轻提示（震动/短音），现在只有首末站弹横幅
-13. walkLegDistance 边缘情况：无首/末步行段时会取到换乘步行距离，需按「首步行段是否在首个乘车段之前」判定
-14. 语音阈值按模式分档：步行用 300/50 偏早，可考虑 150/30；驾车保持 300/50
-15. 环岛出口数：OSRM 实测 maneuver.exit 多为空，现回退成「第 1 个出口」，需按环岛内距离另算
+13. 到站提醒中间站轻提示（震动/短音），现在只有首末站弹横幅
+14. walkLegDistance 边缘情况：无首/末步行段时会取到换乘步行距离，需按「首步行段是否在首个乘车段之前」判定
+15. 语音阈值按模式分档：步行用 300/50 偏早，可考虑 150/30；驾车保持 300/50
+16. 环岛出口数：OSRM 实测 maneuver.exit 多为空，现回退成「第 1 个出口」，需按环岛内距离另算
 
 ────────────────────────────────
 五、建议（赛后 / 长期，不影响本次评分）
