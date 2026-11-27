@@ -98,6 +98,7 @@ const ROUTE_TTL = 30 * 60 * 1000;
 const FUEL_TTL = 30 * 60 * 1000;
 const FUEL_OFFSET_LIMIT = 1000;
 const FUEL_BEHIND_TOLERANCE = 100;
+const FUEL_BEARING_LIMIT = 90;
 const WEATHER_TTL = 20 * 60 * 1000;
 const WEATHER_RETRY_COOLDOWN = 60 * 1000;
 const WEATHER_SCORE_TIMEOUT = 2500;
@@ -2595,6 +2596,20 @@ function fuelCurrentAlong(route) {
   return point ? projectOnRoute(route.points, route.cum, point).along : 0;
 }
 
+function bearingBetween(a, b) {
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+function bearingDiff(a, b) {
+  const diff = Math.abs(a - b) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
 function rankFuelStations(stations) {
   const route = fuelRoute();
 
@@ -2608,12 +2623,16 @@ function rankFuelStations(stations) {
   }
 
   const currentAlong = fuelCurrentAlong(route);
+  const reference = fuelReferencePoint() || state.origin;
+  const forwardPoint = pointAtAlong(route.points, route.cum, currentAlong + 200).point;
+  const forwardBearing = reference && distanceBetween(reference, forwardPoint) > 1 ? bearingBetween(reference, forwardPoint) : null;
   return stations
     .map((station) => {
       const { along, offset } = projectOnRoute(route.points, route.cum, station);
-      return { ...station, along, offset, aheadDistance: along - currentAlong };
+      const angle = Number.isFinite(forwardBearing) ? bearingDiff(forwardBearing, bearingBetween(reference, station)) : 0;
+      return { ...station, along, offset, aheadDistance: along - currentAlong, angle };
     })
-    .filter((station) => station.offset <= FUEL_OFFSET_LIMIT && station.aheadDistance > -FUEL_BEHIND_TOLERANCE)
+    .filter((station) => station.offset <= FUEL_OFFSET_LIMIT && station.aheadDistance > -FUEL_BEHIND_TOLERANCE && station.angle <= FUEL_BEARING_LIMIT)
     .sort((a, b) => a.aheadDistance - b.aheadDistance || a.offset - b.offset);
 }
 
