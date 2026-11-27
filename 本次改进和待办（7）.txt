@@ -134,6 +134,11 @@ ZenMap 本次改进和待办（第 7 轮，更新于 2026-11-27）
 - 另：github.com 域名单独不通（curl 000，api.github.com 正常 200）时，push 会失败而部署不受影响；
   两者走不同链路，不要互相替代，也不要用改 hosts 的方式绕 GitHub
 
+- 工具会在仓库根写站点绑定描述符 .ZenMap.qoder.site（约 31KB，内含 actionId / projectId /
+  siteId / deploymentId / artifactSha256 和 index.html 快照）。每次发布都会重写，
+  属于工具内部状态，不是项目源码：已加入 .gitignore（规则 *.qoder.site），
+  不要提交、不要手改、也不要删除——删了下次发布照样重写。它不受版本管理，也不会进 dist。
+
 地址格式：平台固定为 站点名-随机后缀.qoder.zone，不是 zenmap.qoder.site，属正常规则。
 
 其他：平台会在每个 HTML 末尾注入 watermark 脚本（data-qoder-watermark，指向 qoder.cn），
