@@ -39,6 +39,7 @@ const els = {
   routeSafety: $('#route-safety'),
   safetyDisclaimer: $('#safety-disclaimer'),
   routeStops: $('#route-stops'),
+  rideLine: $('#ride-line'),
   routeRemind: $('#route-remind'),
   boardName: $('#board-name'),
   boardExtra: $('#board-extra'),
@@ -1248,7 +1249,40 @@ function renderTransitStops(route) {
   }
   paintMetric(els.alightExtra, alightHintText(route, last, taxi));
 
+  renderRideLine(route);
   renderRouteExits(route);
+}
+
+function renderRideLine(route) {
+  const rides = (route.legs || []).filter((leg) => !leg.walking && leg.kind !== 'taxi' && leg.kind !== 'railway');
+  els.rideLine.textContent = '';
+  if (!rides.length) {
+    els.rideLine.hidden = true;
+    return;
+  }
+  const first = rides[0];
+  const line = first.label || first.name || '';
+  const dir = rideDirection(first);
+  if (!line && !dir) {
+    els.rideLine.hidden = true;
+    return;
+  }
+  if (line) {
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = line;
+    els.rideLine.append(nameSpan);
+  }
+  if (dir) {
+    const dirSpan = document.createElement('em');
+    dirSpan.textContent = dir;
+    els.rideLine.append(dirSpan);
+  }
+  if (rides.length > 1) {
+    const moreSpan = document.createElement('span');
+    moreSpan.textContent = `等 ${rides.length} 段乘车`;
+    els.rideLine.append(moreSpan);
+  }
+  els.rideLine.hidden = false;
 }
 
 function boardStopName(route) {
@@ -1263,6 +1297,16 @@ function boardStopText(route, leg) {
   const name = boardStopName(route);
   const label = boardExitLabel(route, leg);
   return label ? `${name} ${label}进` : name;
+}
+
+function rideDirection(leg) {
+  const text = String(leg?.direction || '').trim();
+  if (!text) return '';
+  return text.endsWith('方向') ? text : `${text}方向`;
+}
+
+function rideLineText(leg) {
+  return [leg?.label || leg?.name || '', rideDirection(leg)].filter(Boolean).join(' ');
 }
 
 function alightStopName(route, leg) {
@@ -1830,7 +1874,14 @@ function fireAlert(kind) {
   const hint = Number.isFinite(stop.exit?.distance)
     ? (boarding ? `步行到${label}约 ${formatMeters(stop.exit.distance)}` : `距目的地约 ${formatMeters(stop.exit.distance)}`)
     : (boarding ? '请前往上车站' : '请准备下车');
-  const sub = label ? `${name} ${label}${boarding ? '进' : '出'} · ${hint}` : `${name} · ${hint}`;
+  const baseSub = label ? `${name} ${label}${boarding ? '进' : '出'} · ${hint}` : `${name} · ${hint}`;
+  const rideLeg = boarding ? state.route.legs.find((leg) => !leg.walking) : null;
+  const rideShown = Boolean(rideLeg && rideDirection(rideLeg) && (rideLeg.label || rideLeg.name));
+  const rideText = rideShown ? rideLineText(rideLeg) : '';
+  const rideSpeech = rideShown
+    ? [rideLeg.label || rideLeg.name || '', rideDirection(rideLeg)].filter(Boolean).join('，')
+    : '';
+  const sub = rideText ? `乘${rideText} · ${baseSub}` : baseSub;
 
   showBanner(title, sub);
   const canVibrate = !navigator.userActivation || navigator.userActivation.hasBeenActive;
@@ -1839,7 +1890,7 @@ function fireAlert(kind) {
       navigator.vibrate([300, 120, 300]);
     } catch {}
   }
-  speak(boarding ? `请准备上车，${name}${label ? `，从${label}进` : ''}` : `即将到站，${name}${label ? `，从${label}出` : ''}，请准备下车`);
+  speak(boarding ? `请准备上车，${rideSpeech ? `乘坐${rideSpeech}，` : ''}${name}${label ? `，从${label}进` : ''}` : `即将到站，${name}${label ? `，从${label}出` : ''}，请准备下车`);
 }
 
 function speak(text) {
@@ -2355,8 +2406,9 @@ function legGuidance(leg, into, length) {
   if (!leg.walking) {
     const via = leg.viaNum ? ` · 途经 ${leg.viaNum} 站` : '';
     const next = leg.stops?.length ? nextStopText() : '';
-    if (next) return next;
-    return `乘 ${leg.label || leg.name}${via}，在 ${leg.toName || '下车站'} 下车`;
+    if (next) return `${leg.label || leg.name || ''}${leg.label || leg.name ? ' · ' : ''}${next}`;
+    const dir = rideDirection(leg);
+    return `乘 ${leg.label || leg.name}${dir ? `（${dir}）` : ''}${via}，在 ${leg.toName || '下车站'} 下车`;
   }
   const span = leg.distance || length;
   return nextWalkStep(leg, into) || `步行 ${formatMeters(Math.max(0, span - into))} 至 ${leg.to || '目的地'}`;

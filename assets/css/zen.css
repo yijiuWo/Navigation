@@ -640,6 +640,22 @@ input:-webkit-autofill {
   gap: 0.375rem;
 }
 
+.zen-ride-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--z-ink);
+}
+
+.zen-ride-line em {
+  font-style: normal;
+  color: var(--z-accent);
+}
+
 .zen-exit-row {
   display: flex;
   align-items: center;
