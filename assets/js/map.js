@@ -42,10 +42,14 @@ const els = {
   routeRemind: $('#route-remind'),
   boardName: $('#board-name'),
   boardExtra: $('#board-extra'),
+  boardExit: $('#board-exit'),
+  boardNav: $('#board-nav'),
   alightName: $('#alight-name'),
   alightExtra: $('#alight-extra'),
+  alightExit: $('#alight-exit'),
   routeExits: $('#route-exits'),
   routeExitsToggle: $('#route-exits-toggle'),
+  routeExitsToggleText: $('#route-exits-toggle-text'),
   routeExitsList: $('#route-exits-list'),
   transitCross: $('#transit-cross'),
   transitCrossText: $('#transit-cross-text'),
@@ -297,6 +301,9 @@ const state = {
   transitDemoReason: '',
   transitPending: false,
   exitSide: '',
+  link: null,
+  linkPending: false,
+  linkLayers: [],
   remindResult: null,
   bannerTimer: 0,
   nav: { mode: 'off', offHits: 0, lastPan: 0, rerouting: false, view: null, follow: true, toTurn: Infinity, zoomedIn: false, spoken: null, wakeLock: null },
@@ -342,6 +349,18 @@ function writeStorage(key, value) {
 
 function isTransit() {
   return trip?.mode === 'transit';
+}
+
+function activeRoute() {
+  return state.link?.route || state.route;
+}
+
+function inExitLink() {
+  return !!state.link;
+}
+
+function navRidesTransit() {
+  return isTransit() && !state.link;
 }
 
 function isDrive() {
@@ -817,6 +836,7 @@ function resetRouteState() {
   state.transitDemoReason = '';
   state.engine?.clear();
   clearRouteLayers();
+  clearExitLink();
   els.routeOptions.hidden = true;
   els.routeOptions.textContent = '';
   els.safetyDisclaimer.hidden = true;
@@ -1207,28 +1227,52 @@ function renderTransitStops(route) {
   const { taxi, last } = lastRideLegs(route);
   const first = route.legs.find((leg) => !leg.walking);
 
-  els.boardName.textContent = boardStopText(route, first);
-  const boardHint = boardHintText(route, first);
-  els.boardExtra.hidden = !boardHint;
-  els.boardExtra.textContent = boardHint;
+  const boardExit = boardExitLabel(route, first);
+  els.boardName.textContent = boardExit ? boardStopName(route) : boardStopText(route, first);
+  paintExitChip(els.boardExit, boardExit);
+  paintMetric(els.boardExtra, boardHintText(route, first));
+  els.boardNav.hidden = !canNavigateToStop(route);
+  if (!els.boardNav.hidden) els.boardNav.setAttribute('aria-label', `带我去${boardStopText(route, first)}`);
 
+  const alightExit = alightExitLabel(route, last);
   if (last?.kind === 'railway') {
     els.alightName.textContent = railwayLabel(last) || route.alighting.name || '下车站';
+    paintExitChip(els.alightExit, '');
   } else {
-    els.alightName.textContent = alightStopText(route, last);
+    els.alightName.textContent = alightExit ? alightStopName(route, last) : alightStopText(route, last);
+    paintExitChip(els.alightExit, alightExit);
   }
-
-  const alightHint = alightHintText(route, last, taxi);
-  els.alightExtra.hidden = !alightHint;
-  els.alightExtra.textContent = alightHint;
+  paintMetric(els.alightExtra, alightHintText(route, last, taxi));
 
   renderRouteExits(route);
 }
 
+function boardStopName(route) {
+  return route.boarding.name || '上车站';
+}
+
+function boardExitLabel(route, leg) {
+  return leg?.metro ? route.boarding.exit?.label || '' : '';
+}
+
 function boardStopText(route, leg) {
-  const name = route.boarding.name || '上车站';
-  const label = leg?.metro ? route.boarding.exit?.label || '' : '';
+  const name = boardStopName(route);
+  const label = boardExitLabel(route, leg);
   return label ? `${name} ${label}进` : name;
+}
+
+function alightStopName(route, leg) {
+  return (leg && leg.toName) || route.alighting.name || '下车站';
+}
+
+function alightExitLabel(route, leg) {
+  return leg?.metro ? route.alighting.exit?.label || '' : '';
+}
+
+function alightStopText(route, leg) {
+  const name = alightStopName(route, leg);
+  const label = alightExitLabel(route, leg);
+  return label ? `${name} ${label}出` : name;
 }
 
 function boardHintText(route, leg) {
@@ -1242,12 +1286,6 @@ function boardHintText(route, leg) {
   if (leg.kind === 'railway') return '';
   if (leg.kind === 'taxi') return leg.fromName || '';
   return [leg.label || leg.name, leg.direction].filter(Boolean).join(' ');
-}
-
-function alightStopText(route, leg) {
-  const name = (leg && leg.toName) || route.alighting.name || '下车站';
-  const label = leg?.metro ? route.alighting.exit?.label || '' : '';
-  return label ? `${name} ${label}出` : name;
 }
 
 function alightHintText(route, last, taxi) {
@@ -1366,7 +1404,8 @@ function renderRouteExits(route) {
   const stop = side === 'boarding' ? route.boarding : route.alighting;
   const open = !els.routeExitsList.hidden;
   els.routeExits.hidden = false;
-  els.routeExitsToggle.textContent = open ? '收起出入口' : `看 ${stop.name || '车站'} 其他出入口`;
+  els.routeExitsToggleText.textContent = open ? '收起出入口' : `看 ${stop.name || '车站'} 其他出入口`;
+  els.routeExitsToggle.dataset.open = String(open);
 
   els.routeExitsList.textContent = '';
   els.routeExitsList.hidden = !open;
@@ -1375,29 +1414,123 @@ function renderRouteExits(route) {
   const exits = stop.exits || [];
   if (!exits.length) {
     const empty = document.createElement('li');
+    empty.className = 'zen-exit-empty';
     empty.textContent = stop.exitsLoaded ? `暂未找到${stop.name || '该站'}出入口` : '正在获取出入口…';
     els.routeExitsList.append(empty);
     return;
   }
 
+  const reach = side === 'boarding' ? '距上车点' : '距目的地';
   for (const exit of exits) {
-    const item = document.createElement('li');
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'text-left transition-colors hover:text-zen-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zen-ink';
-    const distance = Number.isFinite(exit.distance)
-      ? ` · ${side === 'boarding' ? '距上车点' : '距目的地'}约 ${formatMeters(exit.distance)}`
-      : '';
-    button.textContent = `${exit.label}${distance}${exit === stop.exit || exit.label === stop.exit?.label ? '（当前）' : ''}`;
-    button.addEventListener('click', () => {
-      stop.exit = exit;
-      renderTransitStops(route);
-      els.routeExitsList.hidden = false;
-      renderRouteExits(route);
-    });
-    item.append(button);
-    els.routeExitsList.append(item);
+    els.routeExitsList.append(buildExitRow(route, stop, exit, side, reach));
   }
+}
+
+function buildExitRow(route, stop, exit, side, reach) {
+  const item = document.createElement('li');
+  item.className = 'zen-exit-row';
+
+  const pick = document.createElement('button');
+  pick.type = 'button';
+  pick.className = 'zen-exit-pick';
+  pick.setAttribute('aria-pressed', String(isPickedExit(stop, exit)));
+
+  const name = document.createElement('span');
+  name.className = 'zen-exit-name';
+  name.textContent = exit.label;
+
+  const check = svgIcon('M20 6 9 17l-5-5');
+  check.classList.add('zen-exit-check');
+
+  pick.append(name, check);
+  if (Number.isFinite(exit.distance)) {
+    const dist = document.createElement('span');
+    dist.className = 'zen-exit-dist';
+    dist.textContent = `${reach}约 ${formatMeters(exit.distance)}`;
+    pick.insertBefore(dist, check);
+  }
+  pick.addEventListener('click', () => {
+    stop.exit = exit;
+    renderTransitStops(route);
+    els.routeExitsList.hidden = false;
+    renderRouteExits(route);
+  });
+  item.append(pick);
+
+  if (hasCoord(exit)) {
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'zen-go';
+    go.textContent = '带我去';
+    go.setAttribute('aria-label', `带我去${exit.name || exit.label}`);
+    go.addEventListener('click', () => startExitNav(exit, exit.label || '出入口', 'exit', side === 'boarding', go));
+    item.append(go);
+  }
+
+  return item;
+}
+
+function svgIcon(path) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2.6');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  const node = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  node.setAttribute('d', path);
+  svg.append(node);
+  return svg;
+}
+
+function isPickedExit(stop, exit) {
+  return !!exit && (!!stop && (exit === stop.exit || (!!stop.exit && exit.label === stop.exit.label)));
+}
+
+function hasCoord(point) {
+  return !!point && Number.isFinite(point.lat) && Number.isFinite(point.lng);
+}
+
+function canNavigateToStop(route) {
+  return hasCoord(route?.boarding);
+}
+
+const METRIC_SPLIT = /^(.*?\S)?\s*(\d+(?:\.\d+)?)\s*(m|km)$/;
+
+function paintExitChip(el, label) {
+  el.hidden = !label;
+  if (el.textContent !== label) el.textContent = label;
+}
+
+function paintMetric(el, text) {
+  el.textContent = '';
+  if (!text) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+
+  const matched = METRIC_SPLIT.exec(text);
+  const label = document.createElement('span');
+  label.className = 'zen-metric-label';
+
+  if (!matched) {
+    label.textContent = text;
+    el.append(label);
+    return;
+  }
+
+  label.textContent = matched[1] ? `${matched[1]} ` : '';
+  const value = document.createElement('span');
+  value.className = 'zen-metric-value';
+  value.textContent = matched[2];
+  const unit = document.createElement('span');
+  unit.className = 'zen-metric-unit';
+  unit.textContent = matched[3];
+  value.append(unit);
+  el.append(label, value);
 }
 
 function renderTransitCross(route) {
@@ -1724,6 +1857,7 @@ const NAV_ZOOM_OUT_LIMIT = 200;
 const NAV_FOLLOW_PIXEL = 30;
 const NAV_VOICE_THRESHOLDS = [300, 50];
 const NAV_ARRIVE_LIMIT = 50;
+const NAV_LINK_ARRIVE_LIMIT = 30;
 const NAV_ARROW_ANGLE = {
   uturn: 180,
   'sharp right': 135,
@@ -1781,9 +1915,115 @@ function resetNavTurn() {
   state.nav.zoomedIn = false;
 }
 
+function clearExitLink() {
+  for (const layer of state.linkLayers) layer.remove();
+  state.linkLayers = [];
+  state.link = null;
+}
+
+async function walkRouteTo(origin, target) {
+  try {
+    return ensureRouteMetrics(await fetchWalkRoute({ origin, destination: target }));
+  } catch {
+    return ensureRouteMetrics(buildWalkEstimate(origin, target));
+  }
+}
+
+function drawExitLink() {
+  for (const layer of state.linkLayers) layer.remove();
+  state.linkLayers = [];
+
+  const link = state.link;
+  if (!link) return;
+
+  const line = L.polyline(
+    link.route.points.map((point) => [point.lat, point.lng]),
+    { color: accent(), weight: 5, opacity: 0.95, dashArray: '2 7', lineCap: 'round' },
+  ).addTo(map);
+  const dot = L.marker([link.target.lat, link.target.lng], {
+    icon: L.divIcon({ className: '', html: '<span class="zen-marker-exit"></span>', iconSize: [14, 14], iconAnchor: [7, 7] }),
+    keyboard: false,
+    zIndexOffset: 300,
+  }).addTo(map);
+  state.linkLayers.push(line, dot);
+}
+
+async function startExitNav(target, label, kind, inbound, button) {
+  if (!state.route || state.nav.mode !== 'off' || !hasCoord(target) || state.linkPending) return;
+
+  state.linkPending = true;
+  if (button) {
+    button.disabled = true;
+    button.textContent = '规划中…';
+  }
+
+  try {
+    const origin = state.lastFix ? { lat: state.lastFix.lat, lng: state.lastFix.lng } : state.route.points[0];
+    const targetPoint = { lat: target.lat, lng: target.lng };
+    const route = await walkRouteTo(origin, targetPoint);
+    state.link = { route, label, kind, inbound, target: targetPoint, estimated: !!route.estimated };
+    drawExitLink();
+    startNavigation();
+  } finally {
+    state.linkPending = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = '带我去';
+    }
+  }
+}
+
+function exitLinkArrival(link) {
+  if (link.kind === 'stop') return { speech: `已到${link.label}，请上车`, hint: '请上车' };
+  return link.inbound
+    ? { speech: `已到${link.label}，请进站`, hint: '请进站' }
+    : { speech: `已到${link.label}`, hint: '已到达出入口' };
+}
+
+function arriveExitLink() {
+  const link = state.link;
+  if (!link) return;
+  const arrival = exitLinkArrival(link);
+  stopNavigation();
+  showBanner(`已到${link.label}`, arrival.hint);
+  speak(arrival.speech);
+}
+
+function linkLegText() {
+  const link = state.link;
+  if (!link) return '';
+  return link.estimated ? `前往${link.label} · 按直线估算` : `步行前往${link.label}`;
+}
+
+async function refreshExitLink() {
+  const link = state.link;
+  const fix = state.lastFix;
+  if (!link || !fix) return;
+
+  state.nav.rerouting = true;
+  els.navReroute.disabled = true;
+  els.navReroute.textContent = '正在规划…';
+
+  const route = await walkRouteTo({ lat: fix.lat, lng: fix.lng }, link.target);
+  state.link = { ...link, route, estimated: !!route.estimated };
+  drawExitLink();
+  state.nav.mode = 'following';
+  state.nav.offHits = 0;
+  resetNavTurn();
+  els.navOffRoute.hidden = true;
+  els.navLeg.textContent = linkLegText();
+  updateNavigation(fix);
+  speak('已重新规划路线');
+
+  state.nav.rerouting = false;
+  els.navReroute.disabled = false;
+  els.navReroute.textContent = '重新规划';
+}
+
 function startNavigation() {
-  if (!state.route || state.nav.mode !== 'off') return;
-  const route = ensureRouteMetrics(state.route);
+  const route = ensureRouteMetrics(activeRoute());
+  if (!route || state.nav.mode !== 'off') return;
+  const ride = navRidesTransit();
   state.nav.mode = 'following';
   state.nav.offHits = 0;
   state.nav.follow = true;
@@ -1794,10 +2034,11 @@ function startNavigation() {
   els.navBar.hidden = false;
   els.navExit.hidden = false;
   els.navOffRoute.hidden = true;
-  els.navLeg.hidden = !isTransit();
-  els.navGuide.hidden = isTransit();
+  els.navLeg.hidden = !(ride || state.link);
+  if (state.link) els.navLeg.textContent = linkLegText();
+  els.navGuide.hidden = ride;
   els.navFollow.hidden = true;
-  if (!isTransit()) renderNavGuide(route, 0, route.total);
+  if (!ride) renderNavGuide(route, 0, route.total);
   syncStartNavButton();
   if (state.lastFix) {
     state.nav.lastPan = Date.now();
@@ -1807,7 +2048,10 @@ function startNavigation() {
   state.nav.spoken = new Set();
   startHeadingTrack();
   requestWakeLock();
-  speak(`开始导航，全程 ${(route.total / 1000).toFixed(1)} 公里，预计 ${Math.max(1, Math.round(route.duration / 60))} 分钟`);
+  const total = (route.total / 1000).toFixed(1);
+  const minutes = Math.max(1, Math.round(route.duration / 60));
+  showBanner(state.link ? `前往${state.link.label}` : '导航已开始', `语音需手机未静音 · 全程 ${total} 公里`);
+  speak(`${state.link ? `前往${state.link.label}，` : '开始导航，'}全程 ${total} 公里，预计 ${minutes} 分钟`);
 }
 
 function stopNavigation() {
@@ -1818,6 +2062,7 @@ function stopNavigation() {
   state.nav.toTurn = Infinity;
   state.nav.zoomedIn = false;
   state.nav.spoken = null;
+  clearExitLink();
   delete document.body.dataset.nav;
   els.navBar.hidden = true;
   els.navExit.hidden = true;
@@ -1972,12 +2217,16 @@ function announceNavTurn(index, turn, distance) {
   speak(turn.name ? `${turn.text}，进入${turn.name}` : turn.text);
 }
 
+function setText(el, value) {
+  if (el.textContent !== value) el.textContent = value;
+}
+
 function renderNavGuide(route, along, remaining) {
   const turns = route.turns || [];
   if (!turns.length) {
     state.nav.toTurn = Infinity;
-    els.navGuideDistance.textContent = `全程 ${formatMeters(route.total)}`;
-    els.navGuideAction.textContent = '沿路线前进';
+    setText(els.navGuideDistance, `全程 ${formatMeters(route.total)}`);
+    setText(els.navGuideAction, '沿路线前进');
     paintGuideArrow({ type: 'continue', modifier: '' });
     return;
   }
@@ -1985,8 +2234,8 @@ function renderNavGuide(route, along, remaining) {
   const index = turns.findIndex((turn) => turn.along > along + 5);
   if (index < 0) {
     state.nav.toTurn = 0;
-    els.navGuideDistance.textContent = `前方 ${formatMeters(remaining)}`;
-    els.navGuideAction.textContent = '到达目的地';
+    setText(els.navGuideDistance, `前方 ${formatMeters(remaining)}`);
+    setText(els.navGuideAction, '到达目的地');
     paintGuideArrow({ type: 'arrive', modifier: '' });
     return;
   }
@@ -1994,15 +2243,16 @@ function renderNavGuide(route, along, remaining) {
   const turn = turns[index];
   const distance = Math.max(0, turn.along - along);
   state.nav.toTurn = distance;
-  els.navGuideDistance.textContent = `前方 ${formatMeters(distance)}`;
-  els.navGuideAction.textContent = turn.name && turn.type !== 'arrive' ? `${turn.text}进入${turn.name}` : turn.text;
+  setText(els.navGuideDistance, `前方 ${formatMeters(distance)}`);
+  setText(els.navGuideAction, turn.name && turn.type !== 'arrive' ? `${turn.text}进入${turn.name}` : turn.text);
   paintGuideArrow(turn);
   announceNavTurn(index, turn, distance);
 }
 
 function updateNavigation(fix) {
-  if (state.nav.mode === 'off' || state.nav.mode === 'arrived' || !state.route || !fix) return;
-  const route = ensureRouteMetrics(state.route);
+  const current = activeRoute();
+  if (state.nav.mode === 'off' || state.nav.mode === 'arrived' || !current || !fix) return;
+  const route = ensureRouteMetrics(current);
   const projection = projectOnRoute(route.points, route.cum, fix);
   const remaining = Math.max(0, route.total - projection.along);
   const accurate = Number.isFinite(fix.accuracy) && fix.accuracy <= NAV_ACCURACY_LIMIT;
@@ -2025,9 +2275,17 @@ function updateNavigation(fix) {
   renderNavMetrics(route, remaining);
 
   if (state.nav.mode !== 'following') return;
-  if (isTransit()) els.navLeg.textContent = transitGuidance(route, projection.along);
-  else if (accurate) renderNavGuide(route, projection.along, remaining);
+  if (navRidesTransit()) {
+    els.navLeg.textContent = transitGuidance(route, projection.along);
+  } else {
+    if (state.link) els.navLeg.textContent = linkLegText();
+    if (accurate) renderNavGuide(route, projection.along, remaining);
+  }
   followNavPosition(fix);
+  if (state.link) {
+    if (remaining <= NAV_LINK_ARRIVE_LIMIT) arriveExitLink();
+    return;
+  }
   if (remaining <= NAV_ARRIVE_LIMIT) markNavArrived();
 }
 
@@ -2064,7 +2322,7 @@ function markNavArrived() {
   els.navRemain.textContent = '已到达目的地附近';
   els.navEta.textContent = '';
   els.navLeg.hidden = false;
-  els.navLeg.textContent = isTransit() ? '行程结束，请确认已到站' : '行程结束';
+  els.navLeg.textContent = navRidesTransit() ? '行程结束，请确认已到站' : '行程结束';
   showBanner('已到达', '目的地就在附近');
   speak('已到达目的地附近');
 }
@@ -2124,6 +2382,10 @@ function walkStepText(step, leg) {
 
 async function rerouteFromNavigation() {
   if (state.nav.rerouting || !state.lastFix) return;
+  if (state.link) {
+    await refreshExitLink();
+    return;
+  }
   state.nav.rerouting = true;
   els.navReroute.disabled = true;
   els.navReroute.textContent = '正在规划…';
@@ -2142,8 +2404,8 @@ async function rerouteFromNavigation() {
     state.nav.offHits = 0;
     resetNavTurn();
     els.navOffRoute.hidden = true;
-    els.navLeg.hidden = !isTransit();
-    els.navGuide.hidden = isTransit();
+    els.navLeg.hidden = !navRidesTransit();
+    els.navGuide.hidden = navRidesTransit();
     if (state.lastFix) followNavPosition(state.lastFix);
     updateNavigation(state.lastFix);
     speak('已重新规划路线');
@@ -2170,6 +2432,12 @@ function bindTransitUI() {
     const open = els.transitLegs.hidden;
     els.transitLegs.hidden = !open;
     els.transitCrossToggle.textContent = open ? '收起分段' : '查看分段';
+  });
+
+  els.boardNav.addEventListener('click', () => {
+    const route = state.route;
+    if (!canNavigateToStop(route)) return;
+    startExitNav(route.boarding, route.boarding.name || '上车站', 'stop', true, els.boardNav);
   });
 
   els.routeExitsToggle.addEventListener('click', () => {
@@ -2536,7 +2804,7 @@ function bindTheme() {
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     const neutral = ink();
     if (accuracyCircle) accuracyCircle.setStyle({ color: neutral, fillColor: neutral });
-    for (const layer of state.routeLayers) {
+    for (const layer of [...state.routeLayers, ...state.linkLayers]) {
       if (typeof layer.setStyle !== 'function') continue;
       layer.setStyle({ color: layer.zenFaded ? ghost() : layer.zenNeutral ? neutral : accent() });
     }
