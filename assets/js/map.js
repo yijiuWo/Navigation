@@ -1494,7 +1494,7 @@ function hasCoord(point) {
 }
 
 function canNavigateToStop(route) {
-  return hasCoord(route?.boarding);
+  return hasCoord(route?.boarding?.exit) || hasCoord(route?.boarding);
 }
 
 const METRIC_SPLIT = /^(.*?\S)?\s*(\d+(?:\.\d+)?)\s*(m|km)$/;
@@ -2437,6 +2437,11 @@ function bindTransitUI() {
   els.boardNav.addEventListener('click', () => {
     const route = state.route;
     if (!canNavigateToStop(route)) return;
+    const entry = route.boarding.exit;
+    if (hasCoord(entry)) {
+      startExitNav(entry, entry.label || '出入口', 'exit', true, els.boardNav);
+      return;
+    }
     startExitNav(route.boarding, route.boarding.name || '上车站', 'stop', true, els.boardNav);
   });
 
