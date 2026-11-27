@@ -24,7 +24,7 @@ const els = {
 };
 
 const TRIP_KEY = 'zenmap:trip';
-const MODE_LABEL = { transit: '公交地铁', drive: '自驾', walk: '步行' };
+const MODE_LABEL = { transit: '公共交通', drive: '自驾', walk: '步行' };
 
 const saved = readTrip();
 let trip = {

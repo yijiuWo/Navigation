@@ -104,7 +104,7 @@ const WEATHER_RETRY_COOLDOWN = 60 * 1000;
 const WEATHER_SCORE_TIMEOUT = 2500;
 const WALK_SAFETY_NOTE = '步行评分基于演示风险数据与天气估算，仅供参考';
 const DRIVE_SAFETY_NOTE = '安全评分为启发式估算，风险数据为演示样本';
-const MODE_LABEL = { transit: '公交地铁', drive: '自驾', walk: '步行' };
+const MODE_LABEL = { transit: '公共交通', drive: '自驾', walk: '步行' };
 const MODE_TITLE = { transit: '公交路线', drive: '驾车路线', walk: '步行路线' };
 const TRANSIT_STRATEGIES = [
   { value: '0', label: '最快' },
@@ -1395,6 +1395,10 @@ function fillMissingTransitExit(route) {
   }).catch(() => {});
 }
 
+function exitTerm(side) {
+  return side === 'boarding' ? '进站口' : '出站口';
+}
+
 function renderRouteExits(route) {
   const side = exitSideFor(route);
   state.exitSide = side;
@@ -1408,7 +1412,7 @@ function renderRouteExits(route) {
   const stop = side === 'boarding' ? route.boarding : route.alighting;
   const open = !els.routeExitsList.hidden;
   els.routeExits.hidden = false;
-  els.routeExitsToggleText.textContent = open ? '收起出入口' : `看 ${stop.name || '车站'} 其他出入口`;
+  els.routeExitsToggleText.textContent = open ? `收起${exitTerm(side)}` : `看 ${stop.name || '车站'} 其他${exitTerm(side)}`;
   els.routeExitsToggle.dataset.open = String(open);
 
   els.routeExitsList.textContent = '';
@@ -1419,7 +1423,7 @@ function renderRouteExits(route) {
   if (!exits.length) {
     const empty = document.createElement('li');
     empty.className = 'zen-exit-empty';
-    empty.textContent = stop.exitsLoaded ? `暂未找到${stop.name || '该站'}出入口` : '正在获取出入口…';
+    empty.textContent = stop.exitsLoaded ? `暂未找到${stop.name || '该站'}${exitTerm(side)}` : `正在获取${exitTerm(side)}…`;
     els.routeExitsList.append(empty);
     return;
   }
@@ -1467,7 +1471,7 @@ function buildExitRow(route, stop, exit, side, reach) {
     go.className = 'zen-go';
     go.textContent = '带我去';
     go.setAttribute('aria-label', `带我去${exit.name || exit.label}`);
-    go.addEventListener('click', () => startExitNav(exit, exit.label || '出入口', 'exit', side === 'boarding', go));
+    go.addEventListener('click', () => startExitNav(exit, exit.label || exitTerm(side), 'exit', side === 'boarding', go));
     item.append(go);
   }
 
@@ -1981,7 +1985,7 @@ function exitLinkArrival(link) {
   if (link.kind === 'stop') return { speech: `已到${link.label}，请上车`, hint: '请上车' };
   return link.inbound
     ? { speech: `已到${link.label}，请进站`, hint: '请进站' }
-    : { speech: `已到${link.label}`, hint: '已到达出入口' };
+    : { speech: `已到${link.label}`, hint: '已到达出站口' };
 }
 
 function arriveExitLink() {
@@ -2443,7 +2447,7 @@ function bindTransitUI() {
     if (!canNavigateToStop(route)) return;
     const entry = route.boarding.exit;
     if (hasCoord(entry)) {
-      startExitNav(entry, entry.label || '出入口', 'exit', true, els.boardNav);
+      startExitNav(entry, entry.label || '上车站', 'exit', true, els.boardNav);
       return;
     }
     startExitNav(route.boarding, route.boarding.name || '上车站', 'stop', true, els.boardNav);

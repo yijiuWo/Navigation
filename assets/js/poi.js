@@ -218,7 +218,10 @@ function exitShortName(name) {
   const letter = raw.match(/([A-Za-z]+\d*|\d+)(?:号)?(?:出入口|出口|入口|口)$/);
   if (letter) return `${letter[1]}口`;
   const afterStation = raw.match(/站(.+)$/);
-  return afterStation ? afterStation[1] : '';
+  if (!afterStation) return '';
+  const label = afterStation[1];
+  if (/^(?:地铁)?(?:[出入进]?站?){0,2}(?:出入口|入口|出口|口)$/.test(label)) return '';
+  return label;
 }
 
 async function searchPhotonPoi(query, cityName) {
