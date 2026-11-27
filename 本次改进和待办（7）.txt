@@ -209,7 +209,9 @@ P1 体验（可一轮打包；第 4 条是新功能，其余是小修）
    长路线会有偏差（16.4km 实测差 28 米），要统一到一套里程上
 9. 暗色主色对比度（实测缺陷）：暗色块 --z-accent 改回 #0a84ff（或两主题统一一个值），
    新增 --z-accent-ink: #ffffff 并用到 .zen-option-active 与 .zen-cand-sub，替代现在的 var(--z-surface)；
-   --z-accent-soft 从 --z-fill 的灰色副本改成 rgba(10,132,255,.12)，让 zen.css 221/246/623 三处底色吃上主色
+   不要动 --z-accent-soft：它名字像主色，实际是中性填充，被 .zen-chip(221)、.zen-badge(246)、
+   #route-safety(688) 当底色配 ghost 文字用，改蓝底灰字会直接坏掉；
+   需要主色浅底时新增 --z-accent-tint: rgba(10,132,255,.12)（暗色 .18），只给新组件用
 10. 读屏器刷屏（实测缺陷）：#nav-guide 上的 role="status" aria-live="polite" 挂在整个卡片，
     距离每秒重写一次，VoiceOver/TalkBack 会连续念。改法：容器去掉 role/aria-live，
     只给 #nav-guide-action 加，并在赋值前判等（值没变就不写）
